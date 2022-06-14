@@ -1,0 +1,13 @@
+cscope.*
+*/*.o
+*/*.skel.h
+arm64/blazesym.h
+arm64/libblazesym.a
+arm64/libbpf
+hosttools/
+hosttools/*
+minimal/minimal
+perfbuf/perfbuf-output
+bootstrap/bootstrap
+bootstrap_perfbuf/bootstrap
+profile/profile
