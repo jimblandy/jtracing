@@ -274,6 +274,7 @@ dependencies = [
  "libc",
  "log",
  "nix 0.24.1",
+ "perf-event-open-sys",
  "plain",
  "rand",
  "regex",
@@ -503,6 +504,15 @@ dependencies = [
  "redox_syscall",
  "smallvec",
  "windows-sys",
+]
+
+[[package]]
+name = "perf-event-open-sys"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e2d01c65362b8939563ef6e60dacf097eb7eb9bde15f1e3240a093a9f73d9d6a"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

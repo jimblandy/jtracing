@@ -20,7 +20,7 @@ fn main() {
         .log_time(false)
         .build();
 
-    let applications = vec!["execsnoop_pb"];
+    let applications = vec!["execsnoop_pb", "profile"];
     let out_dir = env::var("OUT_DIR").unwrap();
 
     jinfo!("{}", out_dir);

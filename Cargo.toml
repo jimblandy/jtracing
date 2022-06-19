@@ -20,6 +20,10 @@ path = "opensnoop/opensnoop.rs"
 name = "execsnoop_pb"
 path = "execsnoop_pb/execsnoop_pb.rs"
 
+[[bin]]
+name = "profile"
+path = "profile/profile.rs"
+
 [dependencies]
 log = "0.4"
 jlogger = "0.1"
@@ -34,6 +38,7 @@ libc = "0.2"
 plain = "0.2"
 ctrlc = "3.2"
 chrono = "0.4"
+perf-event-open-sys = "2.0"
 
 [profile.release]
 strip = true
