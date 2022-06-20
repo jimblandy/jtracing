@@ -27,9 +27,9 @@ unsafe impl Plain for Event {}
 
 fn print_to_log(level: PrintLevel, msg: String) {
     match level {
-        PrintLevel::Debug => log::debug!("{}", msg),
-        PrintLevel::Info => log::info!("{}", msg),
-        PrintLevel::Warn => log::warn!("{}", msg),
+        PrintLevel::Debug => log::debug!("{}", msg.trim_matches('\n')),
+        PrintLevel::Info => log::info!("{}", msg.trim_matches('\n')),
+        PrintLevel::Warn => log::warn!("{}", msg.trim_matches('\n')),
     }
 }
 
@@ -152,6 +152,10 @@ fn main() -> Result<()> {
                 peos::bindings::PERF_FLAG_FD_CLOEXEC as u64,
             )
         };
+
+        if pefd == -1 {
+            return Err(Error::msg(format!("Failed open perf event on cpu{}", cpu)));
+        }
 
         pefds.push(pefd);
     }
