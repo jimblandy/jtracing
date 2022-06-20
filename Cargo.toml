@@ -24,6 +24,10 @@ path = "execsnoop_pb/execsnoop_pb.rs"
 name = "profile"
 path = "profile/profile.rs"
 
+[[bin]]
+name = "funccount"
+path = "funccount/funccount.rs"
+
 [dependencies]
 log = "0.4"
 jlogger = "0.1"
