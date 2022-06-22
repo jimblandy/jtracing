@@ -43,8 +43,9 @@ struct {
 	__type(value, struct stacktrace_event);
 } heap SEC(".maps");
 
-SEC("kprobe/do_sys_open")
-int funccount(void *ctx)
+SEC("kprobe/")
+SEC("uprobe/")
+int stacktrace(void *ctx)
 {
 	int pid = bpf_get_current_pid_tgid() >> 32;
 	int cpu_id = bpf_get_smp_processor_id();

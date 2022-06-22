@@ -13,9 +13,9 @@ use {
             atomic::{AtomicBool, Ordering},
             Arc,
         },
-        time::Instant,
+        time::{Duration, Instant},
     },
-    tracelib::bump_memlock_rlimit,
+    tracelib::{bump_memlock_rlimit, SymbolAnalyzer},
 };
 
 #[path = "bpf/funccount.skel.rs"]
@@ -46,9 +46,17 @@ struct Cli {
     ///Use timestamp instead of date time.
     #[clap(short = 't', long)]
     timestamp: bool,
+
+    #[clap()]
+    args: Vec<String>,
 }
 
-fn do_handle_event(_cpu: i32, data: &[u8]) {
+fn do_handle_event(
+    _cpu: i32,
+    data: &[u8],
+    cnt: u32,
+    symanalyzer: &mut SymbolAnalyzer,
+) -> Result<u32> {
     let mut event = Event::default();
     plain::copy_from_bytes(&mut event, data).expect("Corrupted event data");
 
@@ -63,31 +71,46 @@ fn do_handle_event(_cpu: i32, data: &[u8]) {
     };
 
     let comm = trans(event.comm.as_ptr());
-    println!("{:<8}{:<18} @cpu{}", event.pid, comm, event.cpu_id);
+    println!("{}. {:<8}{:<18} @cpu{}", cnt, event.pid, comm, event.cpu_id);
 
     if event.kstack_sz > 0 {
         let number = event.kstack_sz as usize / std::mem::size_of::<u64>();
-        println!("Kernel Stack ({} entries):", number);
+        println!("  Kernel Stack ({} entries):", number);
 
         for i in 0..number {
-            println!("  {:2} 0x{:016x}", i, event.kstack[i as usize]);
+            let addr = event.kstack[i as usize];
+            println!("    {:2} 0x{:016x} {}", i, addr, symanalyzer.ksymbol(addr)?);
         }
     } else {
-        println!("No Kernel Stack.");
+        println!("  No Kernel Stack.");
     }
 
     if event.ustack_sz > 0 {
         let number = event.ustack_sz as usize / std::mem::size_of::<u64>();
-        println!("User Stack ({} entries):", number);
+        println!("  User Stack ({} entries):", number);
 
         for i in 0..number {
-            println!("  {:2} 0x{:016x}", i, event.ustack[i as usize]);
+            let addr = event.ustack[i as usize];
+            println!(
+                "    {:2} 0x{:016x} {}",
+                i,
+                addr,
+                symanalyzer
+                    .usymbol(event.pid, addr)
+                    .unwrap_or(String::from("INVALID"))
+            );
         }
     } else {
-        println!("No User Stack.");
+        println!("  No User Stack.");
     }
 
     println!();
+
+    Ok(cnt + 1)
+}
+
+fn lost_handle(_cpu: i32, lost_count: u64) {
+    println!("lost_handle: {}", lost_count);
 }
 
 fn main() -> Result<()> {
@@ -121,21 +144,31 @@ fn main() -> Result<()> {
         .load()
         .with_context(|| format!("Failed to load bpf."))?;
 
-    let handle_event = move |cpu: i32, data: &[u8]| {
-        do_handle_event(cpu, data);
-    };
+    let mut cnt = 0_u32;
+    let mut symanalyzer = SymbolAnalyzer::new(None)?;
+    let handle_event =
+        move |cpu: i32, data: &[u8]| match do_handle_event(cpu, data, cnt, &mut symanalyzer) {
+            Ok(c) => cnt = c,
+            Err(e) => log::error!("Error: {}", e),
+        };
 
     let perbuf = PerfBufferBuilder::new(skel.maps().pb())
         .sample_cb(handle_event)
+        .lost_cb(lost_handle)
         .pages(32)
         .build()
         .with_context(|| format!("Failed to create perf buffer"))?;
 
-    let mut link = skel
-        .progs_mut()
-        .funccount()
-        .attach_kprobe(false, "do_sys_open")
-        .with_context(|| format!("Failed to attach do_sys_open."))?;
+    let mut links = vec![];
+    for arg in cli.args {
+        let link = skel
+            .progs_mut()
+            .stacktrace()
+            .attach_kprobe(false, &arg)
+            .with_context(|| format!("Failed to attach {}.", arg))?;
+
+        links.push(link);
+    }
 
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
@@ -144,11 +177,18 @@ fn main() -> Result<()> {
         r.store(false, Ordering::SeqCst);
     })?;
 
+    println!("Tracing... Type Ctrl-C to stop.");
     while running.load(Ordering::SeqCst) {
-        perbuf.poll(std::time::Duration::from_millis(100))?;
+        std::thread::sleep(Duration::from_millis(100));
     }
 
-    link.disconnect();
+    perbuf.consume()?;
+
+    /*
+    while let Some(mut link) = links.pop() {
+        link.disconnect();
+    }
+    */
 
     Ok(())
 }

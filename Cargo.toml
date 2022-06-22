@@ -44,6 +44,7 @@ ctrlc = "3.2"
 chrono = "0.4"
 perf-event-open-sys = "2.0"
 hex = "0.4"
+goblin = "0.5"
 
 [profile.release]
 strip = true

@@ -1,9 +1,13 @@
+use goblin::strtab;
+
 #[allow(unused)]
 use {
     anyhow::{Context, Error, Result},
+    goblin::elf::{sym::Sym, Elf},
     jlogger::{jdebug, jerror, jinfo, jwarn, JloggerBuilder},
     log::{debug, error, info, warn, LevelFilter},
     std::{
+        collections::HashMap,
         fmt::Display,
         fs,
         io::{BufRead, BufReader},
@@ -86,16 +90,109 @@ impl KernelSymbolEntry {
     }
 }
 
+pub struct MapTextEntry {
+    pub start: u64,
+    pub end: u64,
+    pub file: String,
+}
+
+impl MapTextEntry {
+    pub fn have(&self, addr: u64) -> bool {
+        addr >= self.start && addr < self.end
+    }
+}
+
+pub struct ExecMap {
+    entries: Vec<MapTextEntry>,
+    pid: u32,
+}
+
+impl ExecMap {
+    const ADDR_MASK: u64 = 0xfffffff000;
+    pub fn new(pid: u32) -> Result<Self> {
+        let mapf = fs::OpenOptions::new()
+            .read(true)
+            .open(format!("/proc/{}/maps", pid))?;
+        let mut reader = BufReader::new(mapf);
+        let mut entries = Vec::new();
+
+        loop {
+            let mut l = String::new();
+
+            let len = reader.read_line(&mut l)?;
+            if len == 0 {
+                break;
+            }
+
+            let it = l
+                .split(' ')
+                .filter(|&a| a.trim().len() > 0)
+                .collect::<Vec<&str>>();
+
+            if it.len() != 6 {
+                continue;
+            }
+
+            let range = it[0];
+            let mode = it[1];
+            if mode != "r-xp" {
+                continue;
+            }
+
+            let file = it[5];
+            let (s, e) = range.split_once('-').ok_or(Error::msg("Invalid data"))?;
+
+            let s = format!("{}{}", "0".repeat(16 - s.len()), s);
+            let e = format!("{}{}", "0".repeat(16 - e.len()), e);
+            let start = addr_str_to_u64(&s)?;
+            let end = addr_str_to_u64(&e)?;
+
+            entries.push(MapTextEntry {
+                start,
+                end,
+                file: file.trim_end_matches('\n').trim().to_string()
+            });
+        }
+
+        Ok(ExecMap { entries, pid })
+    }
+
+    pub fn symbol(&self, addr: u64) -> Result<String> {
+        let mut keys = String::new();
+
+        for entry in &self.entries {
+            keys.push_str(&format!(" {:x}:{:x}", entry.start, entry.end));
+            if entry.have(addr) {
+                return Ok(entry.file.clone());
+            }
+        }
+        return Err(Error::msg(format!(
+            "Invalid addr {:x} for pid {}. Avaliable key: {}",
+            addr, self.pid, keys
+        )));
+    }
+}
+
 pub struct SymbolAnalyzer {
     kallsyms: Vec<KernelSymbolEntry>,
+    map: HashMap<u32, ExecMap>,
 }
 
 fn addr_str_to_u64(addr_str: &str) -> Result<u64> {
-    if let Ok(addr_bytes) = hex::decode(addr_str.trim())?.try_into() {
-        Ok(u64::from_be_bytes(addr_bytes))
-    } else {
-        Err(Error::msg("Invalid address"))
+    let mut u8array: [u8; 8] = [0; 8];
+    let bytes = hex::decode(addr_str.trim())?;
+
+    if bytes.len() != 8 {
+        return Err(Error::msg(format!(
+            "Invalid address {} bytes len: {}",
+            addr_str,
+            bytes.len()
+        )));
     }
+
+    u8array.clone_from_slice(&bytes[..8]);
+
+    Ok(u64::from_be_bytes(u8array))
 }
 
 impl SymbolAnalyzer {
@@ -186,7 +283,10 @@ impl SymbolAnalyzer {
             addr = v.addr();
         }
 
-        Ok(SymbolAnalyzer { kallsyms })
+        Ok(SymbolAnalyzer {
+            kallsyms,
+            map: HashMap::new(),
+        })
     }
 
     pub fn ksymbol_str(&self, addr_str: &str) -> Result<String> {
@@ -217,6 +317,11 @@ impl SymbolAnalyzer {
             Symbol::Symbol(s) => Ok(s),
             _ => Err(Error::msg("Invalid addr")),
         }
+    }
+
+    pub fn usymbol(&mut self, pid: u32, addr: u64) -> Result<String> {
+        let em = self.map.entry(pid).or_insert(ExecMap::new(pid)?);
+        em.symbol(addr)
     }
 }
 
