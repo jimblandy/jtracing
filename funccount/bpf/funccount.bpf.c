@@ -43,6 +43,8 @@ struct {
 	__type(value, struct stacktrace_event);
 } heap SEC(".maps");
 
+int self_pid = 0;
+
 SEC("kprobe/")
 SEC("uprobe/")
 int stacktrace(void *ctx)
@@ -52,6 +54,9 @@ int stacktrace(void *ctx)
 	struct stacktrace_event *event;
 	int cp;
 	int zero = 0;
+
+	if (pid == self_pid)
+		return 0;
 
 	event = bpf_map_lookup_elem(&heap, &zero);
 	if (!event) {

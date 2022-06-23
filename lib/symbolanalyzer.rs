@@ -1,5 +1,3 @@
-use goblin::strtab;
-
 #[allow(unused)]
 use {
     anyhow::{Context, Error, Result},
@@ -108,7 +106,6 @@ pub struct ExecMap {
 }
 
 impl ExecMap {
-    const ADDR_MASK: u64 = 0xfffffff000;
     pub fn new(pid: u32) -> Result<Self> {
         let mapf = fs::OpenOptions::new()
             .read(true)
@@ -142,30 +139,74 @@ impl ExecMap {
             let file = it[5];
             let (s, e) = range.split_once('-').ok_or(Error::msg("Invalid data"))?;
 
-            let s = format!("{}{}", "0".repeat(16 - s.len()), s);
-            let e = format!("{}{}", "0".repeat(16 - e.len()), e);
-            let start = addr_str_to_u64(&s)?;
-            let end = addr_str_to_u64(&e)?;
+            let start = addr_str_to_u64(s)?;
+            let end = addr_str_to_u64(e)?;
 
             entries.push(MapTextEntry {
                 start,
                 end,
-                file: file.trim_end_matches('\n').trim().to_string()
+                file: file.trim_end_matches('\n').trim().to_string(),
             });
         }
 
         Ok(ExecMap { entries, pid })
     }
 
-    pub fn symbol(&self, addr: u64) -> Result<String> {
+    pub fn symbol(&self, addr: u64) -> Result<(String, String)> {
         let mut keys = String::new();
 
         for entry in &self.entries {
             keys.push_str(&format!(" {:x}:{:x}", entry.start, entry.end));
             if entry.have(addr) {
-                return Ok(entry.file.clone());
+                let bindata = fs::read(&entry.file)?;
+                let elf = Elf::parse(&bindata).with_context(|| format!("Invalid EFL binary."))?;
+                let symtab = elf.syms;
+                let dynsmtab = elf.dynsyms;
+                let strtab = elf.strtab;
+                let dynstrtab = elf.dynstrtab;
+                let offset = addr - entry.start;
+                let symname = String::from(format!("?@0x{:x}", offset));
+
+                for sym in symtab.iter() {
+                    let start = sym.st_value as u64;
+                    let size = sym.st_size as u64;
+
+                    if offset >= start && offset < start + size {
+                        if let Some(s) = strtab.get_at(sym.st_name) {
+                            let sym_str = {
+                                if offset == start {
+                                    format!("{}", s)
+                                } else {
+                                    format!("{}+{}", s, offset - start)
+                                }
+                            };
+                            return Ok((sym_str, entry.file.clone()));
+                        }
+                    }
+                }
+
+                for sym in dynsmtab.iter() {
+                    let start = sym.st_value as u64;
+                    let size = sym.st_size as u64;
+
+                    if offset >= start && offset < start + size {
+                        if let Some(s) = dynstrtab.get_at(sym.st_name) {
+                            let sym_str = {
+                                if offset == start {
+                                    format!("{}", s)
+                                } else {
+                                    format!("{}+{}", s, offset - start)
+                                }
+                            };
+                            return Ok((sym_str, entry.file.clone()));
+                        }
+                    }
+                }
+
+                return Ok((symname, entry.file.clone()));
             }
         }
+
         return Err(Error::msg(format!(
             "Invalid addr {:x} for pid {}. Avaliable key: {}",
             addr, self.pid, keys
@@ -178,11 +219,17 @@ pub struct SymbolAnalyzer {
     map: HashMap<u32, ExecMap>,
 }
 
-fn addr_str_to_u64(addr_str: &str) -> Result<u64> {
+pub fn addr_str_to_u64(addr_str: &str) -> Result<u64> {
     let mut u8array: [u8; 8] = [0; 8];
-    let bytes = hex::decode(addr_str.trim())?;
+    let mut fixed_str = String::from(addr_str.trim());
 
-    if bytes.len() != 8 {
+    if fixed_str.len() % 2 != 0 {
+        fixed_str = format!("0{}", fixed_str);
+    }
+
+    let bytes = hex::decode(&fixed_str)?;
+
+    if bytes.len() > 8 {
         return Err(Error::msg(format!(
             "Invalid address {} bytes len: {}",
             addr_str,
@@ -190,7 +237,7 @@ fn addr_str_to_u64(addr_str: &str) -> Result<u64> {
         )));
     }
 
-    u8array.clone_from_slice(&bytes[..8]);
+    u8array[8 - bytes.len()..].clone_from_slice(&bytes[..]);
 
     Ok(u64::from_be_bytes(u8array))
 }
@@ -319,7 +366,7 @@ impl SymbolAnalyzer {
         }
     }
 
-    pub fn usymbol(&mut self, pid: u32, addr: u64) -> Result<String> {
+    pub fn usymbol(&mut self, pid: u32, addr: u64) -> Result<(String, String)> {
         let em = self.map.entry(pid).or_insert(ExecMap::new(pid)?);
         em.symbol(addr)
     }
@@ -334,5 +381,18 @@ mod tests {
 
         let sym = sa.ksymbol_str("ffffffffb731c4f0").unwrap();
         assert_eq!(sym, "do_sys_open");
+    }
+
+    #[test]
+    fn addr_str_to_u64_test() {
+        use crate::symbolanalyzer::addr_str_to_u64;
+        assert_eq!(addr_str_to_u64("0").unwrap(), 0_u64);
+        assert_eq!(addr_str_to_u64("f").unwrap(), 15_u64);
+        assert_eq!(addr_str_to_u64("7f8d66a000").unwrap(), 547833159680_u64);
+        assert_eq!(
+            addr_str_to_u64("000000558e510590").unwrap(),
+            367459894672_u64
+        );
+        assert_eq!(addr_str_to_u64("ffffffffffffffff").unwrap(), u64::MAX);
     }
 }

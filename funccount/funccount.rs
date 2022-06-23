@@ -79,10 +79,10 @@ fn do_handle_event(
 
         for i in 0..number {
             let addr = event.kstack[i as usize];
-            println!("    {:2} 0x{:016x} {}", i, addr, symanalyzer.ksymbol(addr)?);
+            println!("    {:2} {}", i, symanalyzer.ksymbol(addr)?);
         }
-    } else {
-        println!("  No Kernel Stack.");
+
+        println!();
     }
 
     if event.ustack_sz > 0 {
@@ -91,17 +91,12 @@ fn do_handle_event(
 
         for i in 0..number {
             let addr = event.ustack[i as usize];
-            println!(
-                "    {:2} 0x{:016x} {}",
-                i,
-                addr,
-                symanalyzer
-                    .usymbol(event.pid, addr)
-                    .unwrap_or(String::from("INVALID"))
-            );
+            let (symname, filename) = symanalyzer
+                .usymbol(event.pid, addr)
+                .unwrap_or((String::from("Unknown"), String::from("Unknown")));
+
+            println!("    {:2} {:<30} {}", i, symname, filename);
         }
-    } else {
-        println!("  No User Stack.");
     }
 
     println!();
@@ -136,9 +131,11 @@ fn main() -> Result<()> {
 
     set_print(Some((PrintLevel::Debug, print_to_log)));
 
-    let open_skel = skel_builder
+    let mut open_skel = skel_builder
         .open()
         .with_context(|| format!("Failed to open bpf."))?;
+
+    open_skel.bss().self_pid = std::process::id() as i32;
 
     let mut skel = open_skel
         .load()
