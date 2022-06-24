@@ -44,7 +44,11 @@ ctrlc = "3.2"
 chrono = "0.4"
 perf-event-open-sys = "2.0"
 hex = "0.4"
-goblin = "0.5"
+object = "0.29"
+gimli = "0.26"
+addr2line = "0.17"
+typed-arena = "2.0"
+memmap = "0.7"
 
 [profile.release]
 strip = true

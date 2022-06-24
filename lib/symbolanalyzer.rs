@@ -1,9 +1,11 @@
+use object::{Object, ObjectSymbol};
+
 #[allow(unused)]
 use {
     anyhow::{Context, Error, Result},
-    goblin::elf::{sym::Sym, Elf},
     jlogger::{jdebug, jerror, jinfo, jwarn, JloggerBuilder},
     log::{debug, error, info, warn, LevelFilter},
+    regex::Regex,
     std::{
         collections::HashMap,
         fmt::Display,
@@ -112,6 +114,11 @@ impl ExecMap {
             .open(format!("/proc/{}/maps", pid))?;
         let mut reader = BufReader::new(mapf);
         let mut entries = Vec::new();
+        // match something like 
+        // 7fadf15000-7fadf1c000 r-xp 00000000 b3:02 12147                          /usr/lib/libipcon.so.0.0.0
+        let re = Regex::new(
+            r"^([0-9|a-f]+)-([0-9|a-f]+) r\-xp ([0-9|a-f]+ [0-9|a-f|:]+ [0-9]+ +)(/[a-z|A-Z|0-9|\.|\-|_|/]+)\n$",
+        )?;
 
         loop {
             let mut l = String::new();
@@ -121,32 +128,17 @@ impl ExecMap {
                 break;
             }
 
-            let it = l
-                .split(' ')
-                .filter(|&a| a.trim().len() > 0)
-                .collect::<Vec<&str>>();
+            for g in re.captures_iter(&l) {
+                let start = addr_str_to_u64(&g[1])?;
+                let end = addr_str_to_u64(&g[2])?;
+                let file = &g[4].trim_end_matches('\n').trim().to_string();
 
-            if it.len() != 6 {
-                continue;
+                entries.push(MapTextEntry {
+                    start,
+                    end,
+                    file: file.trim_end_matches('\n').trim().to_string(),
+                });
             }
-
-            let range = it[0];
-            let mode = it[1];
-            if mode != "r-xp" {
-                continue;
-            }
-
-            let file = it[5];
-            let (s, e) = range.split_once('-').ok_or(Error::msg("Invalid data"))?;
-
-            let start = addr_str_to_u64(s)?;
-            let end = addr_str_to_u64(e)?;
-
-            entries.push(MapTextEntry {
-                start,
-                end,
-                file: file.trim_end_matches('\n').trim().to_string(),
-            });
         }
 
         Ok(ExecMap { entries, pid })
@@ -158,21 +150,20 @@ impl ExecMap {
         for entry in &self.entries {
             keys.push_str(&format!(" {:x}:{:x}", entry.start, entry.end));
             if entry.have(addr) {
-                let bindata = fs::read(&entry.file)?;
-                let elf = Elf::parse(&bindata).with_context(|| format!("Invalid EFL binary."))?;
-                let symtab = elf.syms;
-                let dynsmtab = elf.dynsyms;
-                let strtab = elf.strtab;
-                let dynstrtab = elf.dynstrtab;
+                let file = fs::File::open(&entry.file)?;
+                let map = unsafe { memmap::Mmap::map(&file)? };
+                let object = object::File::parse(&map[..])?;
+                let syms = object.symbols();
+                let dynsyms = object.dynamic_symbols();
                 let offset = addr - entry.start;
                 let symname = String::from(format!("?@0x{:x}", offset));
 
-                for sym in symtab.iter() {
-                    let start = sym.st_value as u64;
-                    let size = sym.st_size as u64;
+                for sym in syms {
+                    let start = sym.address();
+                    let size = sym.size();
 
                     if offset >= start && offset < start + size {
-                        if let Some(s) = strtab.get_at(sym.st_name) {
+                        if let Ok(s) = sym.name() {
                             let sym_str = {
                                 if offset == start {
                                     format!("{}", s)
@@ -185,12 +176,12 @@ impl ExecMap {
                     }
                 }
 
-                for sym in dynsmtab.iter() {
-                    let start = sym.st_value as u64;
-                    let size = sym.st_size as u64;
+                for sym in dynsyms {
+                    let start = sym.address();
+                    let size = sym.size();
 
                     if offset >= start && offset < start + size {
-                        if let Some(s) = dynstrtab.get_at(sym.st_name) {
+                        if let Ok(s) = sym.name() {
                             let sym_str = {
                                 if offset == start {
                                     format!("{}", s)
