@@ -45,10 +45,7 @@ struct {
 
 int self_pid = 0;
 
-SEC("kprobe/")
-SEC("uprobe/")
-int stacktrace(void *ctx)
-{
+int do_stacktrace(void *ctx) {
 	int pid = bpf_get_current_pid_tgid() >> 32;
 	int cpu_id = bpf_get_smp_processor_id();
 	struct stacktrace_event *event;
@@ -75,4 +72,16 @@ int stacktrace(void *ctx)
 	bpf_perf_event_output(ctx, &pb, BPF_F_CURRENT_CPU, event, sizeof(*event));
 
 	return 0;
+}
+
+SEC("tp/")
+int stacktrace_tp(void *ctx)
+{
+	do_stacktrace(ctx);
+}
+
+SEC("kprobe/")
+int stacktrace_kb(void *ctx)
+{
+	do_stacktrace(ctx);
 }

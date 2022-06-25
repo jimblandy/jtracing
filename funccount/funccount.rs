@@ -7,6 +7,7 @@ use {
     log::{debug, error, info, warn, LevelFilter},
     perf_event_open_sys::{self as peos, bindings::perf_event_attr},
     plain::Plain,
+    regex::Regex,
     std::{
         ffi::{CStr, CString},
         sync::{
@@ -44,8 +45,12 @@ struct Cli {
     verbose: usize,
 
     ///Show symbol address.
-    #[clap(short = 'a', long)]
+    #[clap(short = 'a')]
     addr: bool,
+
+    ///Show file informaton.
+    #[clap(short = 'f')]
+    file: bool,
 
     #[clap()]
     args: Vec<String>,
@@ -57,6 +62,7 @@ fn do_handle_event(
     cnt: u32,
     symanalyzer: &mut SymbolAnalyzer,
     show_addr: bool,
+    show_file: bool,
 ) -> Result<u32> {
     let mut event = Event::default();
     plain::copy_from_bytes(&mut event, data).expect("Corrupted event data");
@@ -74,35 +80,43 @@ fn do_handle_event(
     let comm = trans(event.comm.as_ptr());
     println!("{}. {:<8}{:<18} @cpu{}", cnt, event.pid, comm, event.cpu_id);
 
+    let mut fno = 0;
     if event.kstack_sz > 0 {
         let number = event.kstack_sz as usize / std::mem::size_of::<u64>();
-        println!("  Kernel Stack ({} entries):", number);
 
         for i in 0..number {
             let addr = event.kstack[i as usize];
             if show_addr {
-                println!("    {:2} {:20x} {}", i, addr, symanalyzer.ksymbol(addr)?);
+                println!("    {:3} {:20x} {}", fno, addr, symanalyzer.ksymbol(addr)?);
             } else {
-                println!("    {:2} {}", i, symanalyzer.ksymbol(addr)?);
+                println!("    {:3} {}", fno, symanalyzer.ksymbol(addr)?);
             }
-        }
 
-        println!();
+            fno -= 1;
+        }
     }
 
     if event.ustack_sz > 0 {
         let number = event.ustack_sz as usize / std::mem::size_of::<u64>();
-        println!("  User Stack ({} entries):", number);
 
         for i in 0..number {
             let addr = event.ustack[i as usize];
             let (addr, symname, filename) = symanalyzer.usymbol(event.pid, addr)?;
+            let mut filename_str = String::new();
+            if show_file {
+                filename_str = filename;
+            }
 
             if show_addr {
-                println!("    {:2} {:20x} {:<30} {}", i, addr, symname, filename);
+                println!(
+                    "    {:3} {:20x} {:<30}({})",
+                    fno, addr, symname, filename_str
+                );
             } else {
-                println!("    {:2} {:<30} {}", i, symname, filename);
+                println!("    {:3} {:<30}({})", fno, symname, filename_str);
             }
+
+            fno -= 1;
         }
     }
 
@@ -149,12 +163,14 @@ fn main() -> Result<()> {
     let mut cnt = 0_u32;
     let mut symanalyzer = SymbolAnalyzer::new(None)?;
     let show_addr = cli.addr;
+    let show_file = cli.file;
     let handle_event = move |cpu: i32, data: &[u8]| match do_handle_event(
         cpu,
         data,
         cnt,
         &mut symanalyzer,
         show_addr,
+        show_file,
     ) {
         Ok(c) => cnt = c,
         Err(e) => log::error!("Error: {}", e),
@@ -169,13 +185,48 @@ fn main() -> Result<()> {
 
     let mut links = vec![];
     for arg in cli.args {
-        let link = skel
-            .progs_mut()
-            .stacktrace()
-            .attach_kprobe(false, &arg)
-            .with_context(|| format!("Failed to attach {}.", arg))?;
+        let mut processed = false;
 
-        links.push(link);
+        let tre = Regex::new(r"t:([a-z|0-9|_]+):([a-z|0-9|_]+)")?;
+        if tre.is_match(&arg) {
+            for g in tre.captures_iter(&arg) {
+                let tp_category = &g[1];
+                let tp_name = &g[2];
+
+                println!("Attaching Tracepoint {}:{}.", tp_category, tp_name);
+                let link = skel
+                    .progs_mut()
+                    .stacktrace_tp()
+                    .attach_tracepoint(tp_category, tp_name)
+                    .with_context(|| format!("Failed to attach {}.", arg))?;
+
+                links.push(link);
+                processed = true;
+            }
+        }
+        if processed {
+            continue;
+        }
+
+        let tre = Regex::new(r"(k:)*([a-z|0-9|_]+)")?;
+        if tre.is_match(&arg) {
+            for g in tre.captures_iter(&arg) {
+                let func_name = &g[2];
+
+                println!("Attaching Kprobe {}.", func_name);
+                let link = skel
+                    .progs_mut()
+                    .stacktrace_kb()
+                    .attach_kprobe(false, func_name)
+                    .with_context(|| format!("Failed to attach {}.", arg))?;
+
+                links.push(link);
+                processed = true;
+            }
+        }
+        if processed {
+            continue;
+        }
     }
 
     let running = Arc::new(AtomicBool::new(true));

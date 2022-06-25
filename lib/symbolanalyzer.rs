@@ -1,22 +1,17 @@
-use addr2line::fallible_iterator::FallibleIterator;
-
 #[allow(unused)]
 use {
-    addr2line::Context,
-    anyhow::{Context as AnyhowContext, Error, Result},
+    anyhow::{Error, Result},
     jlogger::{jdebug, jerror, jinfo, jwarn, JloggerBuilder},
     log::{debug, error, info, warn, LevelFilter},
-    object::{Object, ObjectSection, ObjectSymbol, SymbolMap, SymbolMapName},
+    object::{Object, ObjectSymbol},
     regex::Regex,
     std::{
-        borrow::Cow,
         collections::HashMap,
         fmt::Display,
         fs,
         io::{BufRead, BufReader},
-        path::{Path, PathBuf},
+        path::Path,
     },
-    typed_arena::Arena,
 };
 
 #[derive(Clone, Copy)]
@@ -192,40 +187,6 @@ impl ExecMap {
             }
         }
 
-        /* Search dwarf info */
-        let endian = if object.is_little_endian() {
-            gimli::RunTimeEndian::Little
-        } else {
-            gimli::RunTimeEndian::Big
-        };
-
-        let arena_data = Arena::<Cow<[u8]>>::new();
-
-        let mut load_section = |id: gimli::SectionId| -> Result<gimli::EndianSlice<_>> {
-            let name = id.name();
-            match &object.section_by_name(name) {
-                Some(section) => match section.uncompressed_data().unwrap() {
-                    Cow::Borrowed(b) => Ok(gimli::EndianSlice::new(b, endian)),
-                    Cow::Owned(b) => {
-                        Ok(gimli::EndianSlice::new(arena_data.alloc(b.into()), endian))
-                    }
-                },
-                None => Ok(gimli::EndianSlice::new(&[][..], endian)),
-            }
-        };
-
-        let dwarf = gimli::Dwarf::load(&mut load_section).unwrap();
-        let symbols = object.symbol_map();
-        let ctx = Context::from_dwarf(dwarf).unwrap();
-        let mut frames = ctx.find_frames(offset)?.enumerate();
-        while let Some((_, frame)) = frames.next()? {
-            if let Some(func) = frame.function {
-                return Ok(func.raw_name()?.to_string());
-            } else if let Some(func) = symbols.get(offset) {
-                return Ok(func.name().to_string());
-            }
-        }
-
         Err(Error::msg("Not found."))
     }
 
@@ -249,7 +210,7 @@ impl ExecMap {
                         return Ok((offset, sym, entry.file.clone()));
                     }
                 }
-                return Ok((offset, String::from("?"), entry.file.clone()));
+                return Ok((offset, String::from("[unknown]"), entry.file.clone()));
             }
         }
 
