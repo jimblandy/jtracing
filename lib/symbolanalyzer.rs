@@ -1,18 +1,22 @@
-use object::{Object, ObjectSymbol};
+use addr2line::fallible_iterator::FallibleIterator;
 
 #[allow(unused)]
 use {
-    anyhow::{Context, Error, Result},
+    addr2line::Context,
+    anyhow::{Context as AnyhowContext, Error, Result},
     jlogger::{jdebug, jerror, jinfo, jwarn, JloggerBuilder},
     log::{debug, error, info, warn, LevelFilter},
+    object::{Object, ObjectSection, ObjectSymbol, SymbolMap, SymbolMapName},
     regex::Regex,
     std::{
+        borrow::Cow,
         collections::HashMap,
         fmt::Display,
         fs,
         io::{BufRead, BufReader},
         path::{Path, PathBuf},
     },
+    typed_arena::Arena,
 };
 
 #[derive(Clone, Copy)]
@@ -144,57 +148,108 @@ impl ExecMap {
         Ok(ExecMap { entries, pid })
     }
 
+    fn find_symbol(file: &str, offset: u64) -> Result<String> {
+        let file = fs::File::open(file)?;
+        let map = unsafe { memmap::Mmap::map(&file)? };
+        let object = object::File::parse(&map[..])?;
+
+        let syms = object.symbols();
+        let dynsyms = object.dynamic_symbols();
+
+        for sym in syms {
+            let start = sym.address();
+            let size = sym.size();
+
+            if offset >= start && offset < start + size {
+                if let Ok(s) = sym.name() {
+                    let sym_str = {
+                        if offset == start {
+                            format!("{}", s)
+                        } else {
+                            format!("{}+{}", s, offset - start)
+                        }
+                    };
+                    return Ok(sym_str);
+                }
+            }
+        }
+
+        for sym in dynsyms {
+            let start = sym.address();
+            let size = sym.size();
+
+            if offset >= start && offset < start + size {
+                if let Ok(s) = sym.name() {
+                    let sym_str = {
+                        if offset == start {
+                            format!("{}", s)
+                        } else {
+                            format!("{}+{}", s, offset - start)
+                        }
+                    };
+                    return Ok(sym_str);
+                }
+            }
+        }
+
+        /* Search dwarf info */
+        let endian = if object.is_little_endian() {
+            gimli::RunTimeEndian::Little
+        } else {
+            gimli::RunTimeEndian::Big
+        };
+
+        let arena_data = Arena::<Cow<[u8]>>::new();
+
+        let mut load_section = |id: gimli::SectionId| -> Result<gimli::EndianSlice<_>> {
+            let name = id.name();
+            match &object.section_by_name(name) {
+                Some(section) => match section.uncompressed_data().unwrap() {
+                    Cow::Borrowed(b) => Ok(gimli::EndianSlice::new(b, endian)),
+                    Cow::Owned(b) => {
+                        Ok(gimli::EndianSlice::new(arena_data.alloc(b.into()), endian))
+                    }
+                },
+                None => Ok(gimli::EndianSlice::new(&[][..], endian)),
+            }
+        };
+
+        let dwarf = gimli::Dwarf::load(&mut load_section).unwrap();
+        let symbols = object.symbol_map();
+        let ctx = Context::from_dwarf(dwarf).unwrap();
+        let mut frames = ctx.find_frames(offset)?.enumerate();
+        while let Some((_, frame)) = frames.next()? {
+            if let Some(func) = frame.function {
+                return Ok(func.raw_name()?.to_string());
+            } else if let Some(func) = symbols.get(offset) {
+                return Ok(func.name().to_string());
+            }
+        }
+
+        Err(Error::msg("Not found."))
+    }
+
     pub fn symbol(&self, addr: u64) -> Result<(u64, String, String)> {
         let mut keys = String::new();
 
         for entry in &self.entries {
             keys.push_str(&format!(" {:x}:{:x}", entry.start, entry.end));
             if entry.have(addr) {
-                let file = fs::File::open(&entry.file)?;
-                let map = unsafe { memmap::Mmap::map(&file)? };
-                let object = object::File::parse(&map[..])?;
-                let syms = object.symbols();
-                let dynsyms = object.dynamic_symbols();
                 let offset = addr - entry.start;
-                let symname = String::from(format!("?"));
+                let filet_path = fs::canonicalize(Path::new(&entry.file))?;
+                let dir = filet_path.parent().unwrap().to_str().unwrap();
+                let file = filet_path.file_name().unwrap().to_str().unwrap();
+                let debug_file = format!("{}/.debug/{}", dir, file);
+                let debug_file_path = Path::new(&debug_file);
 
-                for sym in syms {
-                    let start = sym.address();
-                    let size = sym.size();
-
-                    if offset >= start && offset < start + size {
-                        if let Ok(s) = sym.name() {
-                            let sym_str = {
-                                if offset == start {
-                                    format!("{}", s)
-                                } else {
-                                    format!("{}+{}", s, offset - start)
-                                }
-                            };
-                            return Ok((offset, sym_str, entry.file.clone()));
-                        }
+                if let Ok(sym) = ExecMap::find_symbol(&entry.file, offset) {
+                    return Ok((offset, sym, entry.file.clone()));
+                } else if debug_file_path.exists() {
+                    if let Ok(sym) = ExecMap::find_symbol(&debug_file, offset) {
+                        return Ok((offset, sym, entry.file.clone()));
                     }
                 }
-
-                for sym in dynsyms {
-                    let start = sym.address();
-                    let size = sym.size();
-
-                    if offset >= start && offset < start + size {
-                        if let Ok(s) = sym.name() {
-                            let sym_str = {
-                                if offset == start {
-                                    format!("{}", s)
-                                } else {
-                                    format!("{}+{}", s, offset - start)
-                                }
-                            };
-                            return Ok((offset, sym_str, entry.file.clone()));
-                        }
-                    }
-                }
-
-                return Ok((offset, symname, entry.file.clone()));
+                return Ok((offset, String::from("?"), entry.file.clone()));
             }
         }
 
