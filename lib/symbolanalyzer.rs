@@ -114,7 +114,7 @@ impl ExecMap {
             .open(format!("/proc/{}/maps", pid))?;
         let mut reader = BufReader::new(mapf);
         let mut entries = Vec::new();
-        // match something like 
+        // match something like
         // 7fadf15000-7fadf1c000 r-xp 00000000 b3:02 12147                          /usr/lib/libipcon.so.0.0.0
         let re = Regex::new(
             r"^([0-9|a-f]+)-([0-9|a-f]+) r\-xp ([0-9|a-f]+ [0-9|a-f|:]+ [0-9]+ +)(/[a-z|A-Z|0-9|\.|\-|_|/]+)\n$",
@@ -144,7 +144,7 @@ impl ExecMap {
         Ok(ExecMap { entries, pid })
     }
 
-    pub fn symbol(&self, addr: u64) -> Result<(String, String)> {
+    pub fn symbol(&self, addr: u64) -> Result<(u64, String, String)> {
         let mut keys = String::new();
 
         for entry in &self.entries {
@@ -156,7 +156,7 @@ impl ExecMap {
                 let syms = object.symbols();
                 let dynsyms = object.dynamic_symbols();
                 let offset = addr - entry.start;
-                let symname = String::from(format!("?@0x{:x}", offset));
+                let symname = String::from(format!("?"));
 
                 for sym in syms {
                     let start = sym.address();
@@ -171,7 +171,7 @@ impl ExecMap {
                                     format!("{}+{}", s, offset - start)
                                 }
                             };
-                            return Ok((sym_str, entry.file.clone()));
+                            return Ok((offset, sym_str, entry.file.clone()));
                         }
                     }
                 }
@@ -189,17 +189,17 @@ impl ExecMap {
                                     format!("{}+{}", s, offset - start)
                                 }
                             };
-                            return Ok((sym_str, entry.file.clone()));
+                            return Ok((offset, sym_str, entry.file.clone()));
                         }
                     }
                 }
 
-                return Ok((symname, entry.file.clone()));
+                return Ok((offset, symname, entry.file.clone()));
             }
         }
 
         return Err(Error::msg(format!(
-            "Invalid addr {:x} for pid {}. Avaliable key: {}",
+            "Invalid addr {:x} for pid {}. Avaliable range: {}",
             addr, self.pid, keys
         )));
     }
@@ -357,7 +357,7 @@ impl SymbolAnalyzer {
         }
     }
 
-    pub fn usymbol(&mut self, pid: u32, addr: u64) -> Result<(String, String)> {
+    pub fn usymbol(&mut self, pid: u32, addr: u64) -> Result<(u64, String, String)> {
         let em = self.map.entry(pid).or_insert(ExecMap::new(pid)?);
         em.symbol(addr)
     }

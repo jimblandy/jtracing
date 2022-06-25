@@ -27,7 +27,7 @@ unsafe impl Plain for Event {}
 
 fn print_to_log(level: PrintLevel, msg: String) {
     match level {
-        PrintLevel::Debug => log::debug!("{}", msg.trim_matches('\n')),
+        PrintLevel::Debug => log::trace!("{}", msg.trim_matches('\n')),
         PrintLevel::Info => log::info!("{}", msg.trim_matches('\n')),
         PrintLevel::Warn => log::warn!("{}", msg.trim_matches('\n')),
     }
@@ -43,9 +43,9 @@ struct Cli {
     #[clap(short, long, parse(from_occurrences))]
     verbose: usize,
 
-    ///Use timestamp instead of date time.
-    #[clap(short = 't', long)]
-    timestamp: bool,
+    ///Show symbol address.
+    #[clap(short = 'a', long)]
+    addr: bool,
 
     #[clap()]
     args: Vec<String>,
@@ -56,6 +56,7 @@ fn do_handle_event(
     data: &[u8],
     cnt: u32,
     symanalyzer: &mut SymbolAnalyzer,
+    show_addr: bool,
 ) -> Result<u32> {
     let mut event = Event::default();
     plain::copy_from_bytes(&mut event, data).expect("Corrupted event data");
@@ -79,7 +80,11 @@ fn do_handle_event(
 
         for i in 0..number {
             let addr = event.kstack[i as usize];
-            println!("    {:2} {}", i, symanalyzer.ksymbol(addr)?);
+            if show_addr {
+                println!("    {:2} {:20x} {}", i, addr, symanalyzer.ksymbol(addr)?);
+            } else {
+                println!("    {:2} {}", i, symanalyzer.ksymbol(addr)?);
+            }
         }
 
         println!();
@@ -91,11 +96,13 @@ fn do_handle_event(
 
         for i in 0..number {
             let addr = event.ustack[i as usize];
-            let (symname, filename) = symanalyzer
-                .usymbol(event.pid, addr)
-                .unwrap_or((String::from("Unknown"), String::from("Unknown")));
+            let (addr, symname, filename) = symanalyzer.usymbol(event.pid, addr)?;
 
-            println!("    {:2} {:<30} {}", i, symname, filename);
+            if show_addr {
+                println!("    {:2} {:20x} {:<30} {}", i, addr, symname, filename);
+            } else {
+                println!("    {:2} {:<30} {}", i, symname, filename);
+            }
         }
     }
 
@@ -111,11 +118,9 @@ fn lost_handle(_cpu: i32, lost_count: u64) {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let max_level = match cli.verbose {
-        0 => log::LevelFilter::Off,
-        1 => log::LevelFilter::Error,
-        2 => log::LevelFilter::Warn,
-        3 => log::LevelFilter::Info,
-        4 => log::LevelFilter::Debug,
+        0 => log::LevelFilter::Info,
+        1 => log::LevelFilter::Debug,
+        2 => log::LevelFilter::Trace,
         _ => log::LevelFilter::Off,
     };
 
@@ -143,11 +148,17 @@ fn main() -> Result<()> {
 
     let mut cnt = 0_u32;
     let mut symanalyzer = SymbolAnalyzer::new(None)?;
-    let handle_event =
-        move |cpu: i32, data: &[u8]| match do_handle_event(cpu, data, cnt, &mut symanalyzer) {
-            Ok(c) => cnt = c,
-            Err(e) => log::error!("Error: {}", e),
-        };
+    let show_addr = cli.addr;
+    let handle_event = move |cpu: i32, data: &[u8]| match do_handle_event(
+        cpu,
+        data,
+        cnt,
+        &mut symanalyzer,
+        show_addr,
+    ) {
+        Ok(c) => cnt = c,
+        Err(e) => log::error!("Error: {}", e),
+    };
 
     let perbuf = PerfBufferBuilder::new(skel.maps().pb())
         .sample_cb(handle_event)
