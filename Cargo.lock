@@ -339,6 +339,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap 3.2.5",
+ "cpp_demangle",
  "ctrlc",
  "gimli",
  "hex",

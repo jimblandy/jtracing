@@ -18,6 +18,7 @@ typedef __u64 stack_trace_t[MAX_STACK_DEPTH];
 struct stacktrace_event {
 	__u32 pid;
 	__u32 cpu_id;
+	unsigned long long ts;
 	char comm[TASK_COMM_LEN];
 	__s32 kstack_sz;
 	__s32 ustack_sz;
@@ -48,6 +49,7 @@ int self_pid = 0;
 int do_stacktrace(void *ctx) {
 	int pid = bpf_get_current_pid_tgid() >> 32;
 	int cpu_id = bpf_get_smp_processor_id();
+	u64 ts = bpf_ktime_get_ns();
 	struct stacktrace_event *event;
 	int cp;
 	int zero = 0;
@@ -60,6 +62,7 @@ int do_stacktrace(void *ctx) {
 		return 0;
 	}
 
+	event->ts = ts;
 	event->pid = pid;
 	event->cpu_id = cpu_id;
 

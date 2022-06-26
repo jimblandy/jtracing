@@ -1,18 +1,28 @@
 #[allow(unused)]
 use {
     anyhow::{Error, Result},
+    cpp_demangle::{BorrowedSymbol, DemangleOptions},
     jlogger::{jdebug, jerror, jinfo, jwarn, JloggerBuilder},
     log::{debug, error, info, warn, LevelFilter},
     object::{Object, ObjectSymbol},
     regex::Regex,
     std::{
         collections::HashMap,
+        ffi::CStr,
         fmt::Display,
         fs,
         io::{BufRead, BufReader},
         path::Path,
     },
 };
+
+pub fn cpp_demangle_sym(sym: &str) -> String {
+    if let Ok(sym) = cpp_demangle::Symbol::new(sym.as_bytes()) {
+        sym.to_string()
+    } else {
+        sym.to_string()
+    }
+}
 
 #[derive(Clone, Copy)]
 pub enum NmSymbolType {
@@ -116,7 +126,7 @@ impl ExecMap {
         // match something like
         // 7fadf15000-7fadf1c000 r-xp 00000000 b3:02 12147                          /usr/lib/libipcon.so.0.0.0
         let re = Regex::new(
-            r"^([0-9|a-f]+)-([0-9|a-f]+) r\-xp ([0-9|a-f]+ [0-9|a-f|:]+ [0-9]+ +)(/[a-z|A-Z|0-9|\.|\-|_|/]+)\n$",
+            r"^([0-9|a-f]+)-([0-9|a-f]+) r\-xp ([0-9|a-f]+ [0-9|a-f|:]+ [0-9]+ +)(/[a-z|A-Z|0-9|\.|\-|_|/|:]+.*)\n$",
         )?;
 
         loop {
@@ -143,47 +153,78 @@ impl ExecMap {
         Ok(ExecMap { entries, pid })
     }
 
-    fn find_symbol(file: &str, offset: u64) -> Result<String> {
-        let file = fs::File::open(file)?;
-        let map = unsafe { memmap::Mmap::map(&file)? };
-        let object = object::File::parse(&map[..])?;
+    fn find_symbol(bin_file: &str, offset: u64) -> Result<String> {
+        let file = fs::File::open(bin_file)?;
+        let mut files = vec![file];
 
-        let syms = object.symbols();
-        let dynsyms = object.dynamic_symbols();
+        while let Some(file) = files.pop() {
+            let mut new_files = Vec::<std::fs::File>::new();
 
-        for sym in syms {
-            let start = sym.address();
-            let size = sym.size();
+            let map = unsafe { memmap::Mmap::map(&file)? };
+            let object = object::File::parse(&map[..])?;
 
-            if offset >= start && offset < start + size {
-                if let Ok(s) = sym.name() {
-                    let sym_str = {
-                        if offset == start {
-                            format!("{}", s)
-                        } else {
-                            format!("{}+{}", s, offset - start)
+            if let Ok(Some((lfn, _crc))) = object.gnu_debuglink() {
+                if let Ok(lf) = String::from_utf8(lfn.to_vec()) {
+                    let plf = Path::new(&lf);
+                    if plf.is_file() {
+                        new_files.push(fs::File::open(lf)?);
+                    } else {
+                        if let Ok(file_path) = fs::canonicalize(Path::new(bin_file)) {
+                            let dir = file_path.parent().unwrap().to_str().unwrap();
+                            let debug_file = format!("{}/.debug/{}", dir, lf);
+                            let debug_file_path = Path::new(&debug_file);
+                            if debug_file_path.is_file() {
+                                new_files.push(fs::File::open(debug_file)?);
+                            }
                         }
-                    };
-                    return Ok(sym_str);
+                    }
+                } else {
                 }
             }
-        }
 
-        for sym in dynsyms {
-            let start = sym.address();
-            let size = sym.size();
+            let syms = object.symbols();
+            let dynsyms = object.dynamic_symbols();
 
-            if offset >= start && offset < start + size {
-                if let Ok(s) = sym.name() {
-                    let sym_str = {
-                        if offset == start {
-                            format!("{}", s)
-                        } else {
-                            format!("{}+{}", s, offset - start)
-                        }
-                    };
-                    return Ok(sym_str);
+            for sym in syms {
+                let start = sym.address();
+                let size = sym.size();
+
+                if offset >= start && offset < start + size {
+                    if let Ok(s) = sym.name() {
+                        let s = cpp_demangle_sym(s);
+                        let sym_str = {
+                            if offset == start {
+                                format!("{}", s)
+                            } else {
+                                format!("{}+{}", s, offset - start)
+                            }
+                        };
+                        return Ok(sym_str);
+                    }
                 }
+            }
+
+            for sym in dynsyms {
+                let start = sym.address();
+                let size = sym.size();
+
+                if offset >= start && offset < start + size {
+                    if let Ok(s) = sym.name() {
+                        let s = cpp_demangle_sym(s);
+                        let sym_str = {
+                            if offset == start {
+                                format!("{}", s)
+                            } else {
+                                format!("{}+{}", s, offset - start)
+                            }
+                        };
+                        return Ok(sym_str);
+                    }
+                }
+            }
+
+            if !new_files.is_empty() {
+                files = new_files;
             }
         }
 
@@ -197,18 +238,8 @@ impl ExecMap {
             keys.push_str(&format!(" {:x}:{:x}", entry.start, entry.end));
             if entry.have(addr) {
                 let offset = addr - entry.start;
-                let filet_path = fs::canonicalize(Path::new(&entry.file))?;
-                let dir = filet_path.parent().unwrap().to_str().unwrap();
-                let file = filet_path.file_name().unwrap().to_str().unwrap();
-                let debug_file = format!("{}/.debug/{}", dir, file);
-                let debug_file_path = Path::new(&debug_file);
-
                 if let Ok(sym) = ExecMap::find_symbol(&entry.file, offset) {
                     return Ok((offset, sym, entry.file.clone()));
-                } else if debug_file_path.exists() {
-                    if let Ok(sym) = ExecMap::find_symbol(&debug_file, offset) {
-                        return Ok((offset, sym, entry.file.clone()));
-                    }
                 }
                 return Ok((offset, String::from("[unknown]"), entry.file.clone()));
             }

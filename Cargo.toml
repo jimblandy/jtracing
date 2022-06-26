@@ -49,6 +49,7 @@ gimli = "0.26"
 addr2line = "0.17"
 typed-arena = "2.0"
 memmap = "0.7"
+cpp_demangle = "0.3"
 
 [profile.release]
 strip = true

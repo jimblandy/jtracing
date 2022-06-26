@@ -21,6 +21,8 @@ use {
 
 #[path = "bpf/funccount.skel.rs"]
 mod funccount;
+use std::collections::HashMap;
+
 use funccount::*;
 
 type Event = funccount_bss_types::stacktrace_event;
@@ -36,7 +38,8 @@ fn print_to_log(level: PrintLevel, msg: String) {
 
 #[derive(Parser, Debug)]
 struct Cli {
-    ///Trace process lives at least <DURATION> ms.
+    ///Trace process lives at least <DURATION> second.
+    ///Disabled when specified 0.
     #[clap(short, default_value_t = 0_u64)]
     duration: u64,
 
@@ -52,21 +55,25 @@ struct Cli {
     #[clap(short = 'f')]
     file: bool,
 
+    ///Show stack informaton.
+    #[clap(short = 's')]
+    stack: bool,
+
+    ///Show count informaton.
+    #[clap(short = 'c')]
+    count: bool,
+
     #[clap()]
     args: Vec<String>,
 }
 
-fn do_handle_event(
-    _cpu: i32,
-    data: &[u8],
-    cnt: u32,
-    symanalyzer: &mut SymbolAnalyzer,
-    show_addr: bool,
-    show_file: bool,
-) -> Result<u32> {
+fn do_handle_event(_cpu: i32, data: &[u8], result: &mut Vec<Event>) {
     let mut event = Event::default();
     plain::copy_from_bytes(&mut event, data).expect("Corrupted event data");
+    result.push(event);
+}
 
+fn print_result(symanalyzer: &mut SymbolAnalyzer, cli: Cli, result: &Vec<Event>) -> Result<()> {
     let trans = |a: *const i8| -> String {
         let ret = String::from("INVALID");
         unsafe {
@@ -77,52 +84,101 @@ fn do_handle_event(
         ret
     };
 
-    let comm = trans(event.comm.as_ptr());
-    println!("{}. {:<8}{:<18} @cpu{}", cnt, event.pid, comm, event.cpu_id);
-
-    let mut fno = 0;
-    if event.kstack_sz > 0 {
-        let number = event.kstack_sz as usize / std::mem::size_of::<u64>();
-
-        for i in 0..number {
-            let addr = event.kstack[i as usize];
-            if show_addr {
-                println!("    {:3} {:20x} {}", fno, addr, symanalyzer.ksymbol(addr)?);
-            } else {
-                println!("    {:3} {}", fno, symanalyzer.ksymbol(addr)?);
-            }
-
-            fno -= 1;
-        }
-    }
-
-    if event.ustack_sz > 0 {
-        let number = event.ustack_sz as usize / std::mem::size_of::<u64>();
-
-        for i in 0..number {
-            let addr = event.ustack[i as usize];
-            let (addr, symname, filename) = symanalyzer.usymbol(event.pid, addr)?;
-            let mut filename_str = String::new();
-            if show_file {
-                filename_str = filename;
-            }
-
-            if show_addr {
-                println!(
-                    "    {:3} {:20x} {:<30}({})",
-                    fno, addr, symname, filename_str
-                );
-            } else {
-                println!("    {:3} {:<30}({})", fno, symname, filename_str);
-            }
-
-            fno -= 1;
-        }
-    }
-
     println!();
 
-    Ok(cnt + 1)
+    if cli.count {
+        if result.is_empty() {
+            return Err(Error::msg("No entry."));
+        }
+
+        let mut hashmap = HashMap::<u32, (String, u32)>::new();
+        for event in result {
+            let pid = event.pid;
+            let comm = trans(event.comm.as_ptr());
+
+            let (_comm, cnt) = &mut hashmap.entry(pid).or_insert((comm, 0));
+            *cnt += 1;
+        }
+
+        println!(
+            "{:<5} {:20} {:<8} {:9}",
+            "PID", "Command", "Count", "Percent"
+        );
+        let total = result.len() as f64;
+        for key in hashmap.keys() {
+            let (comm, cnt) = hashmap.get(key).unwrap();
+            println!(
+                "{:<5} {:20} {:<8} {:5.2}%",
+                key,
+                comm,
+                cnt,
+                ((*cnt as f64) / total) * 100_f64
+            );
+        }
+
+        return Ok(());
+    }
+
+    if !cli.stack {
+        println!(
+            "{:<5} {:<12} {:<5} {:<18} {}",
+            "No", "Timestamp", "PID", "Command", "CPU"
+        );
+    }
+    for (i, event) in result.iter().enumerate() {
+        let comm = trans(event.comm.as_ptr());
+        let us = event.ts / 1000;
+        println!(
+            "{:<5} {:<12.6} {:<5} {:<18} @cpu{}",
+            i + 1,
+            (us as f64) / 1000000_f64,
+            event.pid,
+            comm,
+            event.cpu_id
+        );
+
+        if cli.stack {
+            let mut fno = 0;
+            if event.kstack_sz > 0 {
+                let number = event.kstack_sz as usize / std::mem::size_of::<u64>();
+
+                for i in 0..number {
+                    let addr = event.kstack[i as usize];
+                    if cli.addr {
+                        println!("    {:3} {:20x} {}", fno, addr, symanalyzer.ksymbol(addr)?);
+                    } else {
+                        println!("    {:3} {}", fno, symanalyzer.ksymbol(addr)?);
+                    }
+
+                    fno -= 1;
+                }
+            }
+
+            if event.ustack_sz > 0 {
+                let number = event.ustack_sz as usize / std::mem::size_of::<u64>();
+
+                for i in 0..number {
+                    let addr = event.ustack[i as usize];
+                    let (addr, symname, filename) = symanalyzer.usymbol(event.pid, addr)?;
+                    let mut filename_str = String::new();
+                    if cli.file {
+                        filename_str = format!("({})", filename);
+                    }
+
+                    if cli.addr {
+                        println!("    {:3} {:20x} {} {}", fno, addr, symname, filename_str);
+                    } else {
+                        println!("    {:3} {} {}", fno, symname, filename_str);
+                    }
+
+                    fno -= 1;
+                }
+            }
+
+            println!();
+        }
+    }
+    Ok(())
 }
 
 fn lost_handle(_cpu: i32, lost_count: u64) {
@@ -160,94 +216,92 @@ fn main() -> Result<()> {
         .load()
         .with_context(|| format!("Failed to load bpf."))?;
 
-    let mut cnt = 0_u32;
+    let mut result = Vec::new();
+    {
+        let result_ref = &mut result;
+        let handle_event = move |cpu: i32, data: &[u8]| do_handle_event(cpu, data, result_ref);
+
+        let perbuf = PerfBufferBuilder::new(skel.maps().pb())
+            .sample_cb(handle_event)
+            .lost_cb(lost_handle)
+            .pages(32)
+            .build()
+            .with_context(|| format!("Failed to create perf buffer"))?;
+
+        let mut links = vec![];
+        for arg in &cli.args {
+            let mut processed = false;
+
+            let tre = Regex::new(r"t:([a-z|0-9|_]+):([a-z|0-9|_]+)")?;
+            if tre.is_match(&arg) {
+                for g in tre.captures_iter(&arg) {
+                    let tp_category = &g[1];
+                    let tp_name = &g[2];
+
+                    println!("Attaching Tracepoint {}:{}.", tp_category, tp_name);
+                    let link = skel
+                        .progs_mut()
+                        .stacktrace_tp()
+                        .attach_tracepoint(tp_category, tp_name)
+                        .with_context(|| format!("Failed to attach {}.", arg))?;
+
+                    links.push(link);
+                    processed = true;
+                }
+            }
+            if processed {
+                continue;
+            }
+
+            let tre = Regex::new(r"(k:)*([a-z|0-9|_]+)")?;
+            if tre.is_match(&arg) {
+                for g in tre.captures_iter(&arg) {
+                    let func_name = &g[2];
+
+                    println!("Attaching Kprobe {}.", func_name);
+                    let link = skel
+                        .progs_mut()
+                        .stacktrace_kb()
+                        .attach_kprobe(false, func_name)
+                        .with_context(|| format!("Failed to attach {}.", arg))?;
+
+                    links.push(link);
+                    processed = true;
+                }
+            }
+            if processed {
+                continue;
+            }
+        }
+
+        let running = Arc::new(AtomicBool::new(true));
+        let r = running.clone();
+
+        ctrlc::set_handler(move || {
+            r.store(false, Ordering::SeqCst);
+        })?;
+
+        if cli.duration > 0 {
+            println!("Tracing for {} seconds, Type Ctrl-C to stop.", cli.duration);
+        } else {
+            println!("Tracing... Type Ctrl-C to stop.");
+        }
+        let start = Instant::now();
+        while running.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(100));
+            if cli.duration > 0 && start.elapsed().as_secs() > cli.duration {
+                break;
+            }
+        }
+
+        perbuf.consume()?;
+    }
+
+    println!("Tracing finished, Processing data...");
+
     let mut symanalyzer = SymbolAnalyzer::new(None)?;
-    let show_addr = cli.addr;
-    let show_file = cli.file;
-    let handle_event = move |cpu: i32, data: &[u8]| match do_handle_event(
-        cpu,
-        data,
-        cnt,
-        &mut symanalyzer,
-        show_addr,
-        show_file,
-    ) {
-        Ok(c) => cnt = c,
-        Err(e) => log::error!("Error: {}", e),
-    };
-
-    let perbuf = PerfBufferBuilder::new(skel.maps().pb())
-        .sample_cb(handle_event)
-        .lost_cb(lost_handle)
-        .pages(32)
-        .build()
-        .with_context(|| format!("Failed to create perf buffer"))?;
-
-    let mut links = vec![];
-    for arg in cli.args {
-        let mut processed = false;
-
-        let tre = Regex::new(r"t:([a-z|0-9|_]+):([a-z|0-9|_]+)")?;
-        if tre.is_match(&arg) {
-            for g in tre.captures_iter(&arg) {
-                let tp_category = &g[1];
-                let tp_name = &g[2];
-
-                println!("Attaching Tracepoint {}:{}.", tp_category, tp_name);
-                let link = skel
-                    .progs_mut()
-                    .stacktrace_tp()
-                    .attach_tracepoint(tp_category, tp_name)
-                    .with_context(|| format!("Failed to attach {}.", arg))?;
-
-                links.push(link);
-                processed = true;
-            }
-        }
-        if processed {
-            continue;
-        }
-
-        let tre = Regex::new(r"(k:)*([a-z|0-9|_]+)")?;
-        if tre.is_match(&arg) {
-            for g in tre.captures_iter(&arg) {
-                let func_name = &g[2];
-
-                println!("Attaching Kprobe {}.", func_name);
-                let link = skel
-                    .progs_mut()
-                    .stacktrace_kb()
-                    .attach_kprobe(false, func_name)
-                    .with_context(|| format!("Failed to attach {}.", arg))?;
-
-                links.push(link);
-                processed = true;
-            }
-        }
-        if processed {
-            continue;
-        }
-    }
-
-    let running = Arc::new(AtomicBool::new(true));
-    let r = running.clone();
-
-    ctrlc::set_handler(move || {
-        r.store(false, Ordering::SeqCst);
-    })?;
-
-    println!("Tracing... Type Ctrl-C to stop.");
-    while running.load(Ordering::SeqCst) {
-        std::thread::sleep(Duration::from_millis(100));
-    }
-
-    perbuf.consume()?;
-
-    /*
-    while let Some(mut link) = links.pop() {
-        link.disconnect();
-    }
-    */
+    result.sort_by(|a, b| a.ts.partial_cmp(&b.ts).unwrap());
+    print_result(&mut symanalyzer, cli, &result)?;
 
     Ok(())
 }
