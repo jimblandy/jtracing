@@ -38,12 +38,11 @@ fn print_to_log(level: PrintLevel, msg: String) {
 
 #[derive(Parser, Debug)]
 struct Cli {
-    ///Trace process lives at least <DURATION> second.
-    ///Disabled when specified 0.
+    ///Trace for <DURATION> seconds (0 disabled).
     #[clap(short, default_value_t = 0_u64)]
     duration: u64,
 
-    ///Verbose
+    ///Verbose.
     #[clap(short, long, parse(from_occurrences))]
     verbose: usize,
 
@@ -68,8 +67,12 @@ struct Cli {
     relative: bool,
 
     ///Only trace porcess with specified PID.
-    #[clap(short = 'p')]
+    #[clap(short = 'p', long)]
     pid: Option<i32>,
+
+    ///Only trace porcess with specified NAME.
+    #[clap(short = 'n', long)]
+    name: Option<String>,
 
     #[clap()]
     args: Vec<String>,
@@ -81,7 +84,12 @@ fn do_handle_event(_cpu: i32, data: &[u8], result: &mut Vec<Event>) {
     result.push(event);
 }
 
-fn print_result(symanalyzer: &mut SymbolAnalyzer, cli: Cli, result: &Vec<Event>) -> Result<()> {
+fn print_result(
+    symanalyzer: &mut SymbolAnalyzer,
+    cli: Cli,
+    result: &Vec<Event>,
+    runtime_s: u64,
+) -> Result<()> {
     let trans = |a: *const i8| -> String {
         let ret = String::from("INVALID");
         unsafe {
@@ -109,37 +117,38 @@ fn print_result(symanalyzer: &mut SymbolAnalyzer, cli: Cli, result: &Vec<Event>)
         }
 
         println!(
-            "{:<5} {:20} {:<8} {:9}",
-            "PID", "Command", "Count", "Percent"
+            "{:<5} {:20} {:<8} {:9} {:9}",
+            "PID", "Command", "Count", "Percent", "Counts/s"
         );
         let total = result.len() as f64;
         for key in hashmap.keys() {
             let (comm, cnt) = hashmap.get(key).unwrap();
             println!(
-                "{:<5} {:20} {:<8} {:5.2}%",
+                "{:<5} {:20} {:<8} {:5.2}% {:9}",
                 key,
                 comm,
                 cnt,
-                ((*cnt as f64) / total) * 100_f64
+                ((*cnt as f64) / total) * 100_f64,
+                *cnt as u64 / runtime_s
             );
         }
 
         return Ok(());
     }
 
-    let mut previous_us = 0_u64;
+    let mut previous_us = 0_f64;
 
     if !cli.stack {
         if cli.relative {
-        println!(
-            "{:<5} {:<12} {:<5} {:<18} {}",
-            "No", "Timestamp(R)", "PID", "Command", "CPU"
-        );
+            println!(
+                "{:<5} {:<12} {:<5} {:<18} {}",
+                "No", "Timestamp(R)", "PID", "Command", "CPU"
+            );
         } else {
-        println!(
-            "{:<5} {:<12} {:<5} {:<18} {}",
-            "No", "Timestamp", "PID", "Command", "CPU"
-        );
+            println!(
+                "{:<5} {:<12} {:<5} {:<18} {}",
+                "No", "Timestamp", "PID", "Command", "CPU"
+            );
         }
     }
     for (i, event) in result.iter().enumerate() {
@@ -147,14 +156,15 @@ fn print_result(symanalyzer: &mut SymbolAnalyzer, cli: Cli, result: &Vec<Event>)
         let us = event.ts / 1000;
 
         if cli.relative {
-            let mut diff_us = us - previous_us;
-            if previous_us == 0 {
-                diff_us = 0;
+            let fus = (us as f64) / 1000000_f64;
+            let mut diff_us = fus - previous_us;
+            if previous_us == 0_f64 {
+                diff_us = 0_f64;
             }
-            previous_us = us;
+            previous_us = fus;
 
             println!(
-                "{:<5} {:<12} {:<5} {:<18} @cpu{}",
+                "{:<5} {:<12.6} {:<5} {:<18} @cpu{}",
                 i + 1,
                 diff_us,
                 event.pid,
@@ -255,6 +265,7 @@ fn main() -> Result<()> {
         .load()
         .with_context(|| format!("Failed to load bpf."))?;
 
+    let runtime_s;
     let mut result = Vec::new();
     {
         let result_ref = &mut result;
@@ -263,7 +274,7 @@ fn main() -> Result<()> {
         let perbuf = PerfBufferBuilder::new(skel.maps().pb())
             .sample_cb(handle_event)
             .lost_cb(lost_handle)
-            .pages(32)
+            .pages(64)
             .build()
             .with_context(|| format!("Failed to create perf buffer"))?;
 
@@ -366,20 +377,19 @@ fn main() -> Result<()> {
         }
         let start = Instant::now();
         while running.load(Ordering::SeqCst) {
-            std::thread::sleep(Duration::from_millis(100));
+            perbuf.poll(Duration::from_millis(100))?;
             if cli.duration > 0 && start.elapsed().as_secs() > cli.duration {
                 break;
             }
         }
-
-        perbuf.consume()?;
+        runtime_s = ((start.elapsed().as_millis() - 50) /1000) as u64;
     }
 
     println!("\nTracing finished, Processing data...");
 
     let mut symanalyzer = SymbolAnalyzer::new(None)?;
     result.sort_by(|a, b| a.ts.partial_cmp(&b.ts).unwrap());
-    print_result(&mut symanalyzer, cli, &result)?;
+    print_result(&mut symanalyzer, cli, &result, runtime_s)?;
 
     Ok(())
 }

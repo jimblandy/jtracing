@@ -32,14 +32,14 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
-	__uint(max_entries, 8192);
+	__uint(max_entries, 512);
 	__type(key, int);
 	__type(value, int);
 } pb SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__uint(max_entries, 1);
+	__uint(max_entries, 512);
 	__type(key, int);
 	__type(value, struct stacktrace_event);
 } heap SEC(".maps");
