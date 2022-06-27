@@ -16,7 +16,7 @@ use {
         },
         time::{Duration, Instant},
     },
-    tracelib::{bump_memlock_rlimit, SymbolAnalyzer},
+    tracelib::{bump_memlock_rlimit, ElfFile, SymbolAnalyzer},
 };
 
 #[path = "bpf/funccount.skel.rs"]
@@ -62,6 +62,10 @@ struct Cli {
     ///Show count informaton.
     #[clap(short = 'c')]
     count: bool,
+
+    ///Only trace porcess with specified PID.
+    #[clap(short = 'p')]
+    pid: Option<i32>,
 
     #[clap()]
     args: Vec<String>,
@@ -212,6 +216,10 @@ fn main() -> Result<()> {
 
     open_skel.bss().self_pid = std::process::id() as i32;
 
+    if let Some(pid) = cli.pid {
+        open_skel.bss().target_pid = pid;
+    }
+
     let mut skel = open_skel
         .load()
         .with_context(|| format!("Failed to load bpf."))?;
@@ -249,6 +257,45 @@ fn main() -> Result<()> {
                     processed = true;
                 }
             }
+            if processed {
+                continue;
+            }
+
+            let mut pid = -1;
+            if let Some(p) = cli.pid {
+                if p > 0 {
+                    pid = p;
+                }
+            }
+
+            let tre = Regex::new(r"u:(.+):(.+)")?;
+            if tre.is_match(&arg) {
+                for g in tre.captures_iter(&arg) {
+                    let file = &g[1];
+                    let symbol = &g[2];
+
+                    let elf_file = ElfFile::new(file)?;
+                    let offset = elf_file.find_addr(symbol)? as usize;
+
+                    println!("Attaching uprobe {}:{}.", file, symbol);
+                    /*
+                     * Parameter
+                     *  pid > 0: target process to trace
+                     *  pid == 0 : trace self
+                     *  pid == -1 : trace all processes
+                     * See bpf_program__attach_uprobe()
+                     */
+                    let link = skel
+                        .progs_mut()
+                        .stacktrace_ub()
+                        .attach_uprobe(false, pid, file, offset)
+                        .with_context(|| format!("Failed to attach {}.", arg))?;
+
+                    links.push(link);
+                    processed = true;
+                }
+            }
+
             if processed {
                 continue;
             }
@@ -297,7 +344,7 @@ fn main() -> Result<()> {
         perbuf.consume()?;
     }
 
-    println!("Tracing finished, Processing data...");
+    println!("\nTracing finished, Processing data...");
 
     let mut symanalyzer = SymbolAnalyzer::new(None)?;
     result.sort_by(|a, b| a.ts.partial_cmp(&b.ts).unwrap());

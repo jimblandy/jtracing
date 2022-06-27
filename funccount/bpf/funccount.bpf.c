@@ -45,6 +45,7 @@ struct {
 } heap SEC(".maps");
 
 int self_pid = 0;
+int target_pid = 0;
 
 int do_stacktrace(void *ctx) {
 	int pid = bpf_get_current_pid_tgid() >> 32;
@@ -55,6 +56,9 @@ int do_stacktrace(void *ctx) {
 	int zero = 0;
 
 	if (pid == self_pid)
+		return 0;
+
+	if (target_pid > 0 && pid != target_pid)
 		return 0;
 
 	event = bpf_map_lookup_elem(&heap, &zero);
@@ -85,6 +89,12 @@ int stacktrace_tp(void *ctx)
 
 SEC("kprobe/")
 int stacktrace_kb(void *ctx)
+{
+	do_stacktrace(ctx);
+}
+
+SEC("uprobe/")
+int stacktrace_ub(void *ctx)
 {
 	do_stacktrace(ctx);
 }

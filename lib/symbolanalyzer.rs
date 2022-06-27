@@ -99,21 +99,10 @@ impl KernelSymbolEntry {
     }
 }
 
-pub struct MapTextEntry {
-    pub start: u64,
-    pub end: u64,
-    pub file: String,
-}
-
-impl MapTextEntry {
-    pub fn have(&self, addr: u64) -> bool {
-        addr >= self.start && addr < self.end
-    }
-}
-
 pub struct ExecMap {
-    entries: Vec<MapTextEntry>,
+    entries: Vec<SymbolEntry>,
     pid: u32,
+    file_cache: HashMap<String, ElfFile>,
 }
 
 impl ExecMap {
@@ -142,106 +131,38 @@ impl ExecMap {
                 let end = addr_str_to_u64(&g[2])?;
                 let file = &g[4].trim_end_matches('\n').trim().to_string();
 
-                entries.push(MapTextEntry {
+                entries.push(SymbolEntry {
                     start,
-                    end,
-                    file: file.trim_end_matches('\n').trim().to_string(),
+                    size: end - start,
+                    name: file.trim_end_matches('\n').trim().to_string(),
                 });
             }
         }
 
-        Ok(ExecMap { entries, pid })
+        Ok(ExecMap {
+            entries,
+            pid,
+            file_cache: HashMap::new(),
+        })
     }
 
-    fn find_symbol(bin_file: &str, offset: u64) -> Result<String> {
-        let file = fs::File::open(bin_file)?;
-        let mut files = vec![file];
-
-        while let Some(file) = files.pop() {
-            let mut new_files = Vec::<std::fs::File>::new();
-
-            let map = unsafe { memmap::Mmap::map(&file)? };
-            let object = object::File::parse(&map[..])?;
-
-            if let Ok(Some((lfn, _crc))) = object.gnu_debuglink() {
-                if let Ok(lf) = String::from_utf8(lfn.to_vec()) {
-                    let plf = Path::new(&lf);
-                    if plf.is_file() {
-                        new_files.push(fs::File::open(lf)?);
-                    } else {
-                        if let Ok(file_path) = fs::canonicalize(Path::new(bin_file)) {
-                            let dir = file_path.parent().unwrap().to_str().unwrap();
-                            let debug_file = format!("{}/.debug/{}", dir, lf);
-                            let debug_file_path = Path::new(&debug_file);
-                            if debug_file_path.is_file() {
-                                new_files.push(fs::File::open(debug_file)?);
-                            }
-                        }
-                    }
-                } else {
-                }
-            }
-
-            let syms = object.symbols();
-            let dynsyms = object.dynamic_symbols();
-
-            for sym in syms {
-                let start = sym.address();
-                let size = sym.size();
-
-                if offset >= start && offset < start + size {
-                    if let Ok(s) = sym.name() {
-                        let s = cpp_demangle_sym(s);
-                        let sym_str = {
-                            if offset == start {
-                                format!("{}", s)
-                            } else {
-                                format!("{}+{}", s, offset - start)
-                            }
-                        };
-                        return Ok(sym_str);
-                    }
-                }
-            }
-
-            for sym in dynsyms {
-                let start = sym.address();
-                let size = sym.size();
-
-                if offset >= start && offset < start + size {
-                    if let Ok(s) = sym.name() {
-                        let s = cpp_demangle_sym(s);
-                        let sym_str = {
-                            if offset == start {
-                                format!("{}", s)
-                            } else {
-                                format!("{}+{}", s, offset - start)
-                            }
-                        };
-                        return Ok(sym_str);
-                    }
-                }
-            }
-
-            if !new_files.is_empty() {
-                files = new_files;
-            }
-        }
-
-        Err(Error::msg("Not found."))
-    }
-
-    pub fn symbol(&self, addr: u64) -> Result<(u64, String, String)> {
+    pub fn symbol(&mut self, addr: u64) -> Result<(u64, String, String)> {
         let mut keys = String::new();
 
         for entry in &self.entries {
-            keys.push_str(&format!(" {:x}:{:x}", entry.start, entry.end));
+            keys.push_str(&format!(" {:x}:{:x}", entry.start(), entry.end()));
             if entry.have(addr) {
                 let offset = addr - entry.start;
-                if let Ok(sym) = ExecMap::find_symbol(&entry.file, offset) {
-                    return Ok((offset, sym, entry.file.clone()));
+                let elf = self
+                    .file_cache
+                    .entry(entry.name().to_string())
+                    .or_insert(ElfFile::new(entry.name())?);
+
+                if let Ok(sym) = elf.find_symbol(offset) {
+                    return Ok((offset, sym, entry.name().to_string()));
                 }
-                return Ok((offset, String::from("[unknown]"), entry.file.clone()));
+
+                return Ok((offset, String::from("[unknown]"), entry.name.to_string()));
             }
         }
 
@@ -407,6 +328,139 @@ impl SymbolAnalyzer {
     pub fn usymbol(&mut self, pid: u32, addr: u64) -> Result<(u64, String, String)> {
         let em = self.map.entry(pid).or_insert(ExecMap::new(pid)?);
         em.symbol(addr)
+    }
+}
+
+pub struct SymbolEntry {
+    name: String,
+    start: u64,
+    size: u64,
+}
+
+impl SymbolEntry {
+    pub fn have(&self, addr: u64) -> bool {
+        addr >= self.start && addr < self.start + self.size
+    }
+
+    pub fn name(&self) -> &str {
+        self.name.as_str()
+    }
+
+    pub fn start(&self) -> u64 {
+        self.start
+    }
+
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    pub fn end(&self) -> u64 {
+        self.start + self.size
+    }
+}
+
+pub struct ElfFile {
+    name: String,
+    sym_addr: HashMap<String, SymbolEntry>,
+}
+
+impl ElfFile {
+    pub fn new(file_name: &str) -> Result<Self> {
+        let mut fpathbuf = Path::new(file_name).canonicalize()?;
+        if fpathbuf.is_symlink() {
+            fpathbuf = fs::read_link(fpathbuf)?.canonicalize()?;
+        }
+
+        let fpath = fpathbuf.as_path();
+        if !fpath.is_file() {
+            return Err(Error::msg("Invalid ELF binary"));
+        }
+
+        let file = fs::File::open(fpath)?;
+        let mut files = vec![file];
+        let mut sym_addr = HashMap::new();
+
+        while let Some(file) = files.pop() {
+            let mut new_files = Vec::<std::fs::File>::new();
+
+            let map = unsafe { memmap::Mmap::map(&file)? };
+            let object = object::File::parse(&map[..])?;
+
+            if let Ok(Some((lfn, _crc))) = object.gnu_debuglink() {
+                if let Ok(lf) = String::from_utf8(lfn.to_vec()) {
+                    let plf = Path::new(&lf);
+                    if plf.is_file() {
+                        new_files.push(fs::File::open(lf)?);
+                    } else {
+                        if let Some(d) = fpath.to_path_buf().parent() {
+                            let mut debug_file = d.to_path_buf();
+                            debug_file.push(".debug");
+                            debug_file.push(&lf);
+                            if debug_file.is_file() {
+                                new_files.push(fs::File::open(debug_file)?);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let syms = object.symbols();
+            let dynsyms = object.dynamic_symbols();
+
+            for sym in syms {
+                if let Ok(name) = sym.name() {
+                    let entry = SymbolEntry {
+                        name: name.to_string(),
+                        start: sym.address(),
+                        size: sym.size(),
+                    };
+
+                    sym_addr.insert(entry.name().to_string(), entry);
+                }
+            }
+
+            for sym in dynsyms {
+                if let Ok(name) = sym.name() {
+                    let entry = SymbolEntry {
+                        name: name.to_string(),
+                        start: sym.address(),
+                        size: sym.size(),
+                    };
+
+                    sym_addr.insert(entry.name().to_string(), entry);
+                }
+            }
+
+            if !new_files.is_empty() {
+                files = new_files;
+            }
+        }
+        Ok(ElfFile {
+            name: String::from(fpath.to_str().unwrap()),
+            sym_addr,
+        })
+    }
+
+    pub fn find_symbol(&self, addr: u64) -> Result<String> {
+        for entry in self.sym_addr.values() {
+            if entry.have(addr) {
+                return Ok(entry.name().to_string());
+            }
+        }
+
+        Err(Error::msg("Not Found."))
+    }
+
+    pub fn find_addr(&self, sym: &str) -> Result<u64> {
+        let entry = self
+            .sym_addr
+            .get(sym)
+            .ok_or_else(|| Error::msg("Not found"))?;
+        Ok(entry.start())
+    }
+
+    pub fn name(&self) -> &str {
+        self.name.as_str()
     }
 }
 

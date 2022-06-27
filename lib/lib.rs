@@ -22,6 +22,7 @@ pub mod symbolanalyzer;
 pub use kprobe::Kprobe;
 pub use tracelog::TraceLog;
 pub use symbolanalyzer::SymbolAnalyzer;
+pub use symbolanalyzer::ElfFile;
 
 pub fn writeln_proc(f: &str, s: &str, append: bool) -> Result<()> {
     use std::ffi::CString;
