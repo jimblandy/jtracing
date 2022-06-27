@@ -448,14 +448,14 @@ impl ElfFile {
             }
         }
 
-        Err(Error::msg("Not Found."))
+        Err(Error::msg(format!("Address 0x{:x} Not Found.", addr)))
     }
 
     pub fn find_addr(&self, sym: &str) -> Result<u64> {
         let entry = self
             .sym_addr
             .get(sym)
-            .ok_or_else(|| Error::msg("Not found"))?;
+            .ok_or_else(|| Error::msg(format!("Symbol {} Not Found.", sym)))?;
         Ok(entry.start())
     }
 
