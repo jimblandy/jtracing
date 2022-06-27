@@ -63,6 +63,10 @@ struct Cli {
     #[clap(short = 'c')]
     count: bool,
 
+    ///Show relative time to previous record.
+    #[clap(short = 'r')]
+    relative: bool,
+
     ///Only trace porcess with specified PID.
     #[clap(short = 'p')]
     pid: Option<i32>,
@@ -123,23 +127,50 @@ fn print_result(symanalyzer: &mut SymbolAnalyzer, cli: Cli, result: &Vec<Event>)
         return Ok(());
     }
 
+    let mut previous_us = 0_u64;
+
     if !cli.stack {
+        if cli.relative {
+        println!(
+            "{:<5} {:<12} {:<5} {:<18} {}",
+            "No", "Timestamp(R)", "PID", "Command", "CPU"
+        );
+        } else {
         println!(
             "{:<5} {:<12} {:<5} {:<18} {}",
             "No", "Timestamp", "PID", "Command", "CPU"
         );
+        }
     }
     for (i, event) in result.iter().enumerate() {
         let comm = trans(event.comm.as_ptr());
         let us = event.ts / 1000;
-        println!(
-            "{:<5} {:<12.6} {:<5} {:<18} @cpu{}",
-            i + 1,
-            (us as f64) / 1000000_f64,
-            event.pid,
-            comm,
-            event.cpu_id
-        );
+
+        if cli.relative {
+            let mut diff_us = us - previous_us;
+            if previous_us == 0 {
+                diff_us = 0;
+            }
+            previous_us = us;
+
+            println!(
+                "{:<5} {:<12} {:<5} {:<18} @cpu{}",
+                i + 1,
+                diff_us,
+                event.pid,
+                comm,
+                event.cpu_id
+            );
+        } else {
+            println!(
+                "{:<5} {:<12.6} {:<5} {:<18} @cpu{}",
+                i + 1,
+                (us as f64) / 1000000_f64,
+                event.pid,
+                comm,
+                event.cpu_id
+            );
+        }
 
         if cli.stack {
             let mut fno = 0;
