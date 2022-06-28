@@ -409,8 +409,9 @@ impl ElfFile {
 
             for sym in syms {
                 if let Ok(name) = sym.name() {
+                    let name = cpp_demangle_sym(&name);
                     let entry = SymbolEntry {
-                        name: name.to_string(),
+                        name,
                         start: sym.address(),
                         size: sym.size(),
                     };
@@ -421,8 +422,9 @@ impl ElfFile {
 
             for sym in dynsyms {
                 if let Ok(name) = sym.name() {
+                    let name = cpp_demangle_sym(&name);
                     let entry = SymbolEntry {
-                        name: name.to_string(),
+                        name,
                         start: sym.address(),
                         size: sym.size(),
                     };

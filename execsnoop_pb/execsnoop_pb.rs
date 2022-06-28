@@ -176,7 +176,8 @@ fn main() -> Result<()> {
     })?;
 
     while running.load(Ordering::SeqCst) {
-        perbuf.poll(std::time::Duration::from_millis(100))?;
+        // ctrl-c will fail perbuf.poll()
+        let _ = perbuf.poll(std::time::Duration::from_millis(100));
     }
 
     Ok(())

@@ -377,7 +377,8 @@ fn main() -> Result<()> {
         }
         let start = Instant::now();
         while running.load(Ordering::SeqCst) {
-            perbuf.poll(Duration::from_millis(100))?;
+            // ctrl-c will fail perbuf.poll()
+            let _ = perbuf.poll(Duration::from_millis(100));
             if cli.duration > 0 && start.elapsed().as_secs() > cli.duration {
                 break;
             }
