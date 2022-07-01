@@ -1,15 +1,18 @@
 #[allow(unused)]
 use {
     anyhow::{Context, Error, Result},
+    byteorder::{BigEndian, LittleEndian, NativeEndian, ReadBytesExt},
     clap::Parser,
     jlogger::{jdebug, jerror, jinfo, jwarn, JloggerBuilder},
-    libbpf_rs::{set_print, PerfBuffer, PerfBufferBuilder, PrintLevel},
+    libbpf_rs::{set_print, MapFlags, PerfBuffer, PerfBufferBuilder, PrintLevel},
     log::{debug, error, info, warn, LevelFilter},
     perf_event_open_sys::{self as peos, bindings::perf_event_attr},
     plain::Plain,
     regex::Regex,
+    std::mem::transmute,
     std::{
         ffi::{CStr, CString},
+        io::Cursor,
         sync::{
             atomic::{AtomicBool, Ordering},
             Arc,
@@ -21,9 +24,12 @@ use {
 
 #[path = "bpf/funccount.skel.rs"]
 mod funccount;
+
 use std::collections::HashMap;
 
-use funccount::*;
+use byteorder::ByteOrder;
+use funccount::{funccount_bss_types::stacktrace_event, *};
+use tracelib::symbolanalyzer::ExecMap;
 
 type Event = funccount_bss_types::stacktrace_event;
 unsafe impl Plain for Event {}
@@ -59,12 +65,16 @@ struct Cli {
     stack: bool,
 
     ///Show count informaton.
-    #[clap(short = 'c')]
+    #[clap(short = 'c', default_value_t = true)]
     count: bool,
 
     ///Show relative time to previous record.
     #[clap(short = 'r')]
     relative: bool,
+
+    ///Show relative time to previous record.
+    #[clap(short = 'e')]
+    experiment: bool,
 
     ///Only trace porcess with specified PID.
     #[clap(short = 'p', long)]
@@ -78,18 +88,116 @@ struct Cli {
     args: Vec<String>,
 }
 
-fn do_handle_event(_cpu: i32, data: &[u8], result: &mut Vec<Event>) {
-    let mut event = Event::default();
-    plain::copy_from_bytes(&mut event, data).expect("Corrupted event data");
-    result.push(event);
+struct StackcntResult {
+    cnt: u64,
+    stack: stacktrace_event,
+    kstack: Vec<(u64, String)>,
+    ustack: Vec<(u64, String, String)>,
 }
 
-fn print_result(
+fn do_handle_event(
+    maps: &mut FunccountMaps,
+    result: &mut Vec<StackcntResult>,
     symanalyzer: &mut SymbolAnalyzer,
-    cli: Cli,
-    result: &Vec<Event>,
-    runtime_s: u64,
+    exec_hash: &mut HashMap<u32, ExecMap>,
 ) -> Result<()> {
+    let stackcnt = maps.stackcnt();
+    let stackmap = maps.stackmap();
+    let mut sym_hash = HashMap::new();
+    let mut pid_sym_hash: HashMap<(u32, u64), (u64, String, String)> = HashMap::new();
+
+    for key in stackcnt.keys() {
+        if let Ok(Some(data)) = stackcnt.lookup(&key, MapFlags::ANY) {
+            let mut stack = Event::default();
+            plain::copy_from_bytes(&mut stack, &key).expect("Corrupted event data");
+
+            let mut cnt = 0_u64;
+            plain::copy_from_bytes(&mut cnt, &data).expect("Corrupted event data");
+
+            let mut kstack = vec![];
+            let mut ustack = vec![];
+
+            if stack.kstack > 0 {
+                if let Ok(Some(ks)) = stackmap.lookup(&stack.kstack.to_ne_bytes(), MapFlags::ANY) {
+                    let num = ks.len() / 8;
+                    let mut i = 0_usize;
+
+                    while i < num {
+                        let addr = NativeEndian::read_u64(&ks[0 + 8 * i..0 + 8 * (i + 1)]);
+                        if addr == 0 {
+                            break;
+                        }
+
+                        let sym = sym_hash.entry(addr).or_insert(symanalyzer.ksymbol(addr)?);
+                        kstack.push((addr, sym.to_string()));
+
+                        i += 1;
+                    }
+                }
+            }
+
+            if stack.ustack > 0 {
+                if let Ok(Some(us)) = stackmap.lookup(&stack.ustack.to_ne_bytes(), MapFlags::ANY) {
+                    let num = us.len() / 8;
+                    let mut i = 0_usize;
+
+                    while i < num {
+                        let addr = NativeEndian::read_u64(&us[0 + 8 * i..0 + 8 * (i + 1)]);
+                        if addr == 0 {
+                            break;
+                        }
+                        i += 1;
+
+                        if let Some((sym_addr, symname, filename)) =
+                            pid_sym_hash.get(&(stack.pid, addr))
+                        {
+                            ustack.push((*sym_addr, symname.to_string(), filename.to_string()));
+                            continue;
+                        }
+
+                        if let Ok((sym_addr, symname, filename)) =
+                            symanalyzer.usymbol(stack.pid, addr)
+                        {
+                            pid_sym_hash.insert(
+                                (stack.pid, addr),
+                                (sym_addr, symname.clone(), filename.clone()),
+                            );
+                            ustack.push((sym_addr, symname, filename));
+                            continue;
+                        }
+
+                        if let Some(em) = exec_hash.get_mut(&stack.pid) {
+                            if let Ok((sym_addr, symname, filename)) = em.symbol(addr) {
+                                pid_sym_hash.insert(
+                                    (stack.pid, addr),
+                                    (sym_addr, symname.clone(), filename.clone()),
+                                );
+                                ustack.push((sym_addr, symname, filename));
+                                continue;
+                            }
+                        }
+
+                        pid_sym_hash.insert(
+                            (stack.pid, addr),
+                            (addr, "[unknown]".to_string(), "[unknown]".to_string()),
+                        );
+                        ustack.push((addr, "[unknown]".to_string(), "[unknown]".to_string()));
+                    }
+                }
+            }
+
+            result.push(StackcntResult {
+                cnt,
+                stack,
+                kstack,
+                ustack,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn print_result(cli: Cli, result: &Vec<StackcntResult>, runtime_s: u64) -> Result<()> {
     let trans = |a: *const i8| -> String {
         let ret = String::from("INVALID");
         unsafe {
@@ -107,104 +215,42 @@ fn print_result(
             return Err(Error::msg("No entry."));
         }
 
-        let mut hashmap = HashMap::<u32, (String, u32)>::new();
-        for event in result {
-            let pid = event.pid;
-            let comm = trans(event.comm.as_ptr());
-
-            let (_comm, cnt) = &mut hashmap.entry(pid).or_insert((comm, 0));
-            *cnt += 1;
-        }
-
         println!(
             "{:<5} {:20} {:<8} {:9} {:9}",
             "PID", "Command", "Count", "Percent", "Counts/s"
         );
-        let total = result.len() as f64;
-        for key in hashmap.keys() {
-            let (comm, cnt) = hashmap.get(key).unwrap();
+        let mut total = 0_u64;
+        for event in result {
+            total += event.cnt;
+        }
+
+        for event in result {
+            let pid = event.stack.pid;
+            let comm = trans(event.stack.comm.as_ptr());
+            let cnt = event.cnt;
+
             println!(
                 "{:<5} {:20} {:<8} {:5.2}% {:9}",
-                key,
+                pid,
                 comm,
                 cnt,
-                ((*cnt as f64) / total) * 100_f64,
-                *cnt as u64 / runtime_s
+                (cnt as f64 / total as f64) * 100_f64,
+                cnt / runtime_s
             );
-        }
 
-        return Ok(());
-    }
-
-    let mut previous_us = 0_f64;
-
-    if !cli.stack {
-        if cli.relative {
-            println!(
-                "{:<5} {:<12} {:<5} {:<18} {}",
-                "No", "Timestamp(R)", "PID", "Command", "CPU"
-            );
-        } else {
-            println!(
-                "{:<5} {:<12} {:<5} {:<18} {}",
-                "No", "Timestamp", "PID", "Command", "CPU"
-            );
-        }
-    }
-    for (i, event) in result.iter().enumerate() {
-        let comm = trans(event.comm.as_ptr());
-        let us = event.ts / 1000;
-
-        if cli.relative {
-            let fus = (us as f64) / 1000000_f64;
-            let mut diff_us = fus - previous_us;
-            if previous_us == 0_f64 {
-                diff_us = 0_f64;
-            }
-            previous_us = fus;
-
-            println!(
-                "{:<5} {:<12.6} {:<5} {:<18} @cpu{}",
-                i + 1,
-                diff_us,
-                event.pid,
-                comm,
-                event.cpu_id
-            );
-        } else {
-            println!(
-                "{:<5} {:<12.6} {:<5} {:<18} @cpu{}",
-                i + 1,
-                (us as f64) / 1000000_f64,
-                event.pid,
-                comm,
-                event.cpu_id
-            );
-        }
-
-        if cli.stack {
             let mut fno = 0;
-            if event.kstack_sz > 0 {
-                let number = event.kstack_sz as usize / std::mem::size_of::<u64>();
-
-                for i in 0..number {
-                    let addr = event.kstack[i as usize];
+            if cli.stack {
+                for (addr, sym) in event.kstack.iter() {
                     if cli.addr {
-                        println!("    {:3} {:20x} {}", fno, addr, symanalyzer.ksymbol(addr)?);
+                        println!("    {:3} {:20x} {}", fno, addr, sym);
                     } else {
-                        println!("    {:3} {}", fno, symanalyzer.ksymbol(addr)?);
+                        println!("    {:3} {}", fno, sym);
                     }
 
                     fno -= 1;
                 }
-            }
 
-            if event.ustack_sz > 0 {
-                let number = event.ustack_sz as usize / std::mem::size_of::<u64>();
-
-                for i in 0..number {
-                    let addr = event.ustack[i as usize];
-                    let (addr, symname, filename) = symanalyzer.usymbol(event.pid, addr)?;
+                for (addr, symname, filename) in event.ustack.iter() {
                     let mut filename_str = String::new();
                     if cli.file {
                         filename_str = format!("({})", filename);
@@ -219,15 +265,12 @@ fn print_result(
                     fno -= 1;
                 }
             }
-
-            println!();
         }
-    }
-    Ok(())
-}
 
-fn lost_handle(_cpu: i32, lost_count: u64) {
-    println!("lost_handle: {}", lost_count);
+        return Ok(());
+    }
+
+    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -265,19 +308,10 @@ fn main() -> Result<()> {
         .load()
         .with_context(|| format!("Failed to load bpf."))?;
 
-    let runtime_s;
+    let mut runtime_s;
+    let mut exec_hash: HashMap<u32, ExecMap> = HashMap::new();
     let mut result = Vec::new();
     {
-        let result_ref = &mut result;
-        let handle_event = move |cpu: i32, data: &[u8]| do_handle_event(cpu, data, result_ref);
-
-        let perbuf = PerfBufferBuilder::new(skel.maps().pb())
-            .sample_cb(handle_event)
-            .lost_cb(lost_handle)
-            .pages(64)
-            .build()
-            .with_context(|| format!("Failed to create perf buffer"))?;
-
         let mut links = vec![];
         for arg in &cli.args {
             let mut processed = false;
@@ -363,6 +397,7 @@ fn main() -> Result<()> {
             }
         }
 
+        let start = Instant::now();
         let running = Arc::new(AtomicBool::new(true));
         let r = running.clone();
 
@@ -375,22 +410,50 @@ fn main() -> Result<()> {
         } else {
             println!("Tracing... Type Ctrl-C to stop.");
         }
-        let start = Instant::now();
+
+        let exec_hash_ref = &mut exec_hash;
+        let map = &skel.maps();
+        let try_to_store_pid_info = cli.experiment;
+
+        let mut store_pid_info = move || {
+            if try_to_store_pid_info {
+                let stackcnt = map.stackcnt();
+                for key in stackcnt.keys() {
+                    let mut stack = Event::default();
+                    plain::copy_from_bytes(&mut stack, &key).expect("Corrupted event data");
+                    if exec_hash_ref.get(&stack.pid).is_none() {
+                        if let Ok(em) = ExecMap::new(stack.pid) {
+                            exec_hash_ref.insert(stack.pid, em);
+                        }
+                    }
+                }
+            }
+        };
+
         while running.load(Ordering::SeqCst) {
-            // ctrl-c will fail perbuf.poll()
-            let _ = perbuf.poll(Duration::from_millis(100));
+            std::thread::sleep(Duration::from_millis(100));
+            store_pid_info();
+
             if cli.duration > 0 && start.elapsed().as_secs() > cli.duration {
                 break;
             }
         }
-        runtime_s = ((start.elapsed().as_millis() - 50) /1000) as u64;
+        runtime_s = start.elapsed().as_secs();
     }
 
+    let start2 = Instant::now();
     println!("\nTracing finished, Processing data...");
 
     let mut symanalyzer = SymbolAnalyzer::new(None)?;
-    result.sort_by(|a, b| a.ts.partial_cmp(&b.ts).unwrap());
-    print_result(&mut symanalyzer, cli, &result, runtime_s)?;
+    do_handle_event(
+        &mut skel.maps(),
+        &mut result,
+        &mut symanalyzer,
+        &mut exec_hash,
+    )?;
+    runtime_s += start2.elapsed().as_secs();
+    result.sort_by(|a, b| b.cnt.partial_cmp(&a.cnt).unwrap());
+    print_result(cli, &result, runtime_s)?;
 
     Ok(())
 }

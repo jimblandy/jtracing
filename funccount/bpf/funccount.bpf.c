@@ -9,21 +9,15 @@
 #define TASK_COMM_LEN 16
 #endif
 
-#ifndef MAX_STACK_DEPTH
-#define MAX_STACK_DEPTH         128
+#ifndef PERF_MAX_STACK_DEPTH
+#define PERF_MAX_STACK_DEPTH 127
 #endif
 
-typedef __u64 stack_trace_t[MAX_STACK_DEPTH];
-
 struct stacktrace_event {
-	__u32 pid;
-	__u32 cpu_id;
-	unsigned long long ts;
+	u32 pid;
 	char comm[TASK_COMM_LEN];
-	__s32 kstack_sz;
-	__s32 ustack_sz;
-	stack_trace_t kstack;
-	stack_trace_t ustack;
+	u32 kstack;
+	u32 ustack;
 };
 
 struct stacktrace_event _stacktrace_event = {};
@@ -31,29 +25,29 @@ struct stacktrace_event _stacktrace_event = {};
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
 struct {
-	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
-	__uint(max_entries, 512);
-	__type(key, int);
-	__type(value, int);
-} pb SEC(".maps");
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 10000);
+	__type(key, struct stacktrace_event);
+	__type(value, u64);
+} stackcnt SEC(".maps");
 
 struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__uint(max_entries, 512);
-	__type(key, int);
-	__type(value, struct stacktrace_event);
-} heap SEC(".maps");
+	__uint(type, BPF_MAP_TYPE_STACK_TRACE);
+	__type(key, u32);
+	__uint(value_size, PERF_MAX_STACK_DEPTH * sizeof(u64));
+	__uint(max_entries, 1000);
+} stackmap SEC(".maps");
+
 
 int self_pid = 0;
 int target_pid = 0;
 
 int do_stacktrace(void *ctx) {
-	int pid = bpf_get_current_pid_tgid() >> 32;
-	int cpu_id = bpf_get_smp_processor_id();
-	u64 ts = bpf_ktime_get_ns();
-	struct stacktrace_event *event;
+	struct stacktrace_event key;
 	int cp;
 	int zero = 0;
+	u64 *val, one = 1;
+	int pid = bpf_get_current_pid_tgid() >> 32;
 
 	if (pid == self_pid)
 		return 0;
@@ -61,22 +55,20 @@ int do_stacktrace(void *ctx) {
 	if (target_pid > 0 && pid != target_pid)
 		return 0;
 
-	event = bpf_map_lookup_elem(&heap, &zero);
-	if (!event) {
+	key.pid = pid;
+	bpf_get_current_comm(&key.comm, sizeof(key.comm));
+	key.kstack = bpf_get_stackid(ctx, &stackmap, 0 | BPF_F_FAST_STACK_CMP);
+	key.ustack = bpf_get_stackid(ctx, &stackmap, 0 | BPF_F_FAST_STACK_CMP | BPF_F_USER_STACK);
+	if ((int)key.kstack < 0 && (int)key.ustack < 0) {
 		return 0;
 	}
 
-	event->ts = ts;
-	event->pid = pid;
-	event->cpu_id = cpu_id;
-
-	if (bpf_get_current_comm(event->comm, sizeof(event->comm)))
-		event->comm[0] = 0;
-
-	event->kstack_sz = bpf_get_stack(ctx, event->kstack, sizeof(event->kstack), 0);
-	event->ustack_sz = bpf_get_stack(ctx, event->ustack, sizeof(event->ustack), BPF_F_USER_STACK);
-
-	bpf_perf_event_output(ctx, &pb, BPF_F_CURRENT_CPU, event, sizeof(*event));
+	val = bpf_map_lookup_elem(&stackcnt, &key);
+	if (val) {
+		(*val)++;
+	} else {
+		bpf_map_update_elem(&stackcnt, &key, &one, BPF_NOEXIST);
+	}
 
 	return 0;
 }
