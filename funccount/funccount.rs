@@ -69,6 +69,10 @@ struct Cli {
     #[clap(short = 'e')]
     exec: bool,
 
+    ///Trace function execution.
+    #[clap(short = 'c', long)]
+    count: Option<u32>,
+
     ///Show relative time to previous record.
     #[clap(short = 'r')]
     relative: bool,
@@ -243,9 +247,12 @@ fn print_result(cli: &Cli, result: &Vec<TraceResult>, runtime_s: u64) -> Result<
     result_stack.sort_by(|&a, &b| b.cnt.partial_cmp(&a.cnt).unwrap());
     result_exec.sort_by(|&a, &b| a.ts.partial_cmp(&b.ts).unwrap());
 
-    if !result_exec.is_empty() {
-        println!("{:<12} {:<5} {:20} ", "Timestamp", "PID", "Command");
+    let show_limit = cli.count.unwrap_or(u32::MAX);
 
+    if !result_exec.is_empty() {
+        let mut show_count = 0;
+
+        println!("{:<12} {:<5} {:20} ", "Timestamp", "PID", "Command");
         let mut ts_previous = 0_u64;
         for event in result_exec {
             let pid = event.entry.pid;
@@ -270,31 +277,60 @@ fn print_result(cli: &Cli, result: &Vec<TraceResult>, runtime_s: u64) -> Result<
                 pid,
                 comm,
             );
+
+            show_count += 1;
+            if show_count >= show_limit {
+                break;
+            }
         }
     }
 
     if !result_stack.is_empty() {
+        let mut show_count = 0;
+
         println!(
             "{:<5} {:20} {:<8} {:9} {:9}",
             "PID", "Command", "Count", "Percent", "Counts/s"
         );
 
-        for event in result_stack {
-            let pid = event.stack.pid;
-            let comm = bytes_to_string(event.stack.comm.as_ptr());
-            let cnt = event.cnt;
+        if !cli.stack {
+            let mut pid_cnt = HashMap::new();
 
-            println!(
-                "{:<5} {:20} {:<8} {:5.2}% {:9}",
-                pid,
-                comm,
-                cnt,
-                (cnt as f64 / total_cnt as f64) * 100_f64,
-                cnt / runtime_s
-            );
+            for event in result_stack {
+                let pid = event.stack.pid;
+                let comm = bytes_to_string(event.stack.comm.as_ptr());
+                let cnt = event.cnt;
 
-            let mut fno = 0;
-            if cli.stack {
+                let (_comm_, cnt_) = pid_cnt.entry(pid).or_insert((comm, 0_u64));
+                *cnt_ += cnt;
+            }
+
+            for (_, (pid, (comm, cnt))) in pid_cnt.iter().enumerate() {
+                println!(
+                    "{:<5} {:20} {:<8} {:5.2}% {:9}",
+                    pid,
+                    comm,
+                    cnt,
+                    (*cnt as f64 / total_cnt as f64) * 100_f64,
+                    cnt / runtime_s
+                );
+            }
+        } else {
+            for event in result_stack {
+                let pid = event.stack.pid;
+                let comm = bytes_to_string(event.stack.comm.as_ptr());
+                let cnt = event.cnt;
+
+                println!(
+                    "{:<5} {:20} {:<8} {:5.2}% {:9}",
+                    pid,
+                    comm,
+                    cnt,
+                    (cnt as f64 / total_cnt as f64) * 100_f64,
+                    cnt / runtime_s
+                );
+
+                let mut fno = 0;
                 for (addr, sym) in event.kstack.iter() {
                     if cli.addr {
                         println!("    {:3} {:20x} {}", fno, addr, sym);
@@ -318,6 +354,11 @@ fn print_result(cli: &Cli, result: &Vec<TraceResult>, runtime_s: u64) -> Result<
                     }
 
                     fno -= 1;
+                }
+
+                show_count += 1;
+                if show_count >= show_limit {
+                    break;
                 }
             }
         }
