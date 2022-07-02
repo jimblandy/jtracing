@@ -30,8 +30,8 @@ struct exectrace_event {
 struct {
 	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
 	__uint(max_entries, 8192);
-	__type(key, int);
-	__type(value, int);
+	__uint(key_size, sizeof(int));
+	__uint(value_size, sizeof(int));
 } exectrace_pb SEC(".maps");
 
 struct stacktrace_event _stacktrace_event = {};
@@ -64,8 +64,40 @@ int self_pid = 0;
 int target_pid = 0;
 int trace_type = 0;
 
-int do_trace(void *ctx) {
+int do_stack_trace(struct pt_regs *ctx) {
 	struct stacktrace_event key;
+	u64 *val, one = 1;
+	int pid = bpf_get_current_pid_tgid() >> 32;
+	u64 ts = 0;
+
+	if (pid == self_pid)
+		return 0;
+
+	if (target_pid > 0 && pid != target_pid)
+		return 0;
+
+	if (trace_type == 1) 
+		return 0;
+
+	key.pid = pid;
+	bpf_get_current_comm(&key.comm, sizeof(key.comm));
+	key.kstack = bpf_get_stackid(ctx, &stackmap, 0 | BPF_F_FAST_STACK_CMP);
+	key.ustack = bpf_get_stackid(ctx, &stackmap, 0 | BPF_F_FAST_STACK_CMP | BPF_F_USER_STACK);
+	if ((int)key.kstack < 0 && (int)key.ustack < 0) {
+		return 0;
+	}
+
+	val = bpf_map_lookup_elem(&stackcnt, &key);
+	if (val) {
+		(*val)++;
+	} else {
+		bpf_map_update_elem(&stackcnt, &key, &one, BPF_NOEXIST);
+	}
+
+	return 0;
+}
+
+int do_exec_trace(struct pt_regs *ctx) {
 	struct exectrace_event ekey;
 	u64 *val, one = 1;
 	int pid = bpf_get_current_pid_tgid() >> 32;
@@ -77,32 +109,31 @@ int do_trace(void *ctx) {
 	if (target_pid > 0 && pid != target_pid)
 		return 0;
 
-	if (trace_type == 1) {
-		ekey.pid = pid;
-		bpf_get_current_comm(&ekey.comm, sizeof(ekey.comm));
-		ts = bpf_ktime_get_ns();
+	if (trace_type == 0) 
+		return 0;
 
-		ekey.ts0 = ts;
-		ekey.ts1 = ts >> 32;
+	ekey.pid = pid;
+	bpf_get_current_comm(&ekey.comm, sizeof(ekey.comm));
+	ts = bpf_ktime_get_ns();
 
-		bpf_map_update_elem(&exectime, &ekey, &ts, BPF_NOEXIST);
-	} else {
-		key.pid = pid;
-		bpf_get_current_comm(&key.comm, sizeof(key.comm));
-		key.kstack = bpf_get_stackid(ctx, &stackmap, 0 | BPF_F_FAST_STACK_CMP);
-		key.ustack = bpf_get_stackid(ctx, &stackmap, 0 | BPF_F_FAST_STACK_CMP | BPF_F_USER_STACK);
-		if ((int)key.kstack < 0 && (int)key.ustack < 0) {
-			return 0;
-		}
+	ekey.ts0 = ts;
+	ekey.ts1 = ts >> 32;
 
-		val = bpf_map_lookup_elem(&stackcnt, &key);
-		if (val) {
-			(*val)++;
-		} else {
-			bpf_map_update_elem(&stackcnt, &key, &one, BPF_NOEXIST);
-		}
-	}
+	bpf_map_update_elem(&exectime, &ekey, &ts, BPF_NOEXIST);
 
+	return 0;
+}
+
+int do_pid_trace(void *ctx) {
+	int pid = bpf_get_current_pid_tgid() >> 32;
+
+	if (pid == self_pid)
+		return 0;
+
+	if (target_pid > 0 && pid != target_pid)
+		return 0;
+
+	
 	bpf_perf_event_output(ctx,
 			&exectrace_pb,
 			BPF_F_CURRENT_CPU,
@@ -115,17 +146,23 @@ int do_trace(void *ctx) {
 SEC("tp/")
 int stacktrace_tp(void *ctx)
 {
-	do_trace(ctx);
+	do_stack_trace(ctx);
+	do_exec_trace(ctx);
+	do_pid_trace(ctx);
 }
 
 SEC("kprobe/")
 int stacktrace_kb(void *ctx)
 {
-	do_trace(ctx);
+	do_stack_trace(ctx);
+	do_exec_trace(ctx);
+	do_pid_trace(ctx);
 }
 
 SEC("uprobe/")
 int stacktrace_ub(void *ctx)
 {
-	do_trace(ctx);
+	do_stack_trace(ctx);
+	do_exec_trace(ctx);
+	do_pid_trace(ctx);
 }
