@@ -72,7 +72,7 @@ int do_stack_trace(struct pt_regs *ctx) {
 	if (pid == self_pid)
 		return 0;
 
-	if (target_pid > 0 && pid != target_pid)
+	if (target_pid >= 0 && pid != target_pid)
 		return 0;
 
 	if (trace_type == 1) 

@@ -394,6 +394,8 @@ fn main() -> Result<()> {
 
     if let Some(pid) = cli.pid {
         open_skel.bss().target_pid = pid;
+    } else {
+        open_skel.bss().target_pid = -1;
     }
 
     if cli.exec {
@@ -439,7 +441,9 @@ fn main() -> Result<()> {
                     exec_map_hash_ref.insert(pid, em);
                 }
                 Err(e) => {
-                    jwarn!("Failed to read maps for pid {}: {}", pid, e)
+                    if pid != 0 {
+                        jwarn!("Failed to read maps for pid {}: {}", pid, e)
+                    }
                 }
             }
         };
