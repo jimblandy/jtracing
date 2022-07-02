@@ -119,12 +119,8 @@ fn process_events(
         for key in exectime.keys() {
             let mut entry = ExecTraceEvent::default();
             plain::copy_from_bytes(&mut entry, &key).expect("Corrupted event data");
-
-            if let Ok(Some(data)) = exectime.lookup(&key, MapFlags::ANY) {
-                let ts: u64 = NativeEndian::read_u64(&data);
-
-                result.push(TraceResult::Exec(ExecTraceResult { ts, entry }));
-            }
+            let ts: u64 = NativeEndian::read_u64(&entry.ts);
+            result.push(TraceResult::Exec(ExecTraceResult { ts, entry }));
         }
     } else {
         let stackcnt = maps.stackcnt();

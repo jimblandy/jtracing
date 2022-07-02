@@ -23,8 +23,7 @@ struct stacktrace_event {
 struct exectrace_event {
 	u32 pid;
 	char comm[TASK_COMM_LEN];
-	u32 ts0;
-	u32 ts1;
+	unsigned char ts[8];
 };
 
 struct {
@@ -57,7 +56,7 @@ struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, 10000);
 	__type(key, struct exectrace_event);
-	__type(value, u64);
+	__type(value, int);
 } exectime SEC(".maps");
 
 int self_pid = 0;
@@ -99,7 +98,7 @@ int do_stack_trace(struct pt_regs *ctx) {
 
 int do_exec_trace(struct pt_regs *ctx) {
 	struct exectrace_event ekey;
-	u64 *val, one = 1;
+	int one = 1;
 	int pid = bpf_get_current_pid_tgid() >> 32;
 	u64 ts = 0;
 
@@ -116,10 +115,9 @@ int do_exec_trace(struct pt_regs *ctx) {
 	bpf_get_current_comm(&ekey.comm, sizeof(ekey.comm));
 	ts = bpf_ktime_get_ns();
 
-	ekey.ts0 = ts;
-	ekey.ts1 = ts >> 32;
 
-	bpf_map_update_elem(&exectime, &ekey, &ts, BPF_NOEXIST);
+	__builtin_memcpy(&ekey.ts, &ts, sizeof(ts));
+	bpf_map_update_elem(&exectime, &ekey, &one, BPF_NOEXIST);
 
 	return 0;
 }
