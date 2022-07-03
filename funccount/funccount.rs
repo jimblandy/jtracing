@@ -21,7 +21,7 @@ use {
         },
         time::{Duration, Instant},
     },
-    tracelib::{bump_memlock_rlimit, ElfFile, ExecMap, SymbolAnalyzer},
+    tracelib::{bump_memlock_rlimit, bytes_to_string, ElfFile, ExecMap, SymbolAnalyzer},
 };
 
 #[path = "bpf/funccount.skel.rs"]
@@ -213,17 +213,9 @@ fn process_events(
     Ok(())
 }
 
-fn bytes_to_string(b: *const i8) -> String {
-    let ret = String::from("INVALID");
-    unsafe {
-        if let Ok(s) = CStr::from_ptr(std::mem::transmute(b)).to_str() {
-            return s.to_owned();
-        }
-    }
-    ret
-}
-
 fn print_result(cli: &Cli, result: &Vec<TraceResult>, runtime_s: u64) -> Result<()> {
+    let runtime_s = if runtime_s == 0 { 1 } else { runtime_s };
+
     println!();
 
     let mut result_stack = vec![];
@@ -285,8 +277,13 @@ fn print_result(cli: &Cli, result: &Vec<TraceResult>, runtime_s: u64) -> Result<
         let mut show_count = 0;
 
         println!(
-            "{:<5} {:20} {:<8} {:9} {:9}",
-            "PID", "Command", "Count", "Percent", "Counts/s"
+            "Total count: {}, {}counts/s",
+            total_cnt,
+            total_cnt / runtime_s
+        );
+        println!(
+            "  {:<5} {:20} {:<8} {:9} {:9}",
+            "PID", "COMMAND", "COUNTS", "PERCENT", "COUNTS/s"
         );
 
         if !cli.stack {
@@ -303,7 +300,7 @@ fn print_result(cli: &Cli, result: &Vec<TraceResult>, runtime_s: u64) -> Result<
 
             for (_, (pid, (comm, cnt))) in pid_cnt.iter().enumerate() {
                 println!(
-                    "{:<5} {:20} {:<8} {:5.2}% {:9}",
+                    "  {:<5} {:20} {:<8} {:5.2}% {:9}",
                     pid,
                     comm,
                     cnt,
@@ -586,7 +583,7 @@ fn main() -> Result<()> {
 
     let start2 = Instant::now();
 
-    println!("\nTracing finished, Processing data...");
+    println!("Tracing finished, Processing data...");
 
     let mut symanalyzer = SymbolAnalyzer::new(None)?;
     process_events(
