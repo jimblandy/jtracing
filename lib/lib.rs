@@ -126,12 +126,13 @@ pub fn bump_memlock_rlimit() {
     }
 }
 
-pub fn bytes_to_string(b: *const i8) -> String {
+/// # Safety
+///
+/// This function might dereference a raw pointer.
+pub unsafe fn bytes_to_string(b: *const i8) -> String {
     let ret = String::from("INVALID");
-    unsafe {
-        if let Ok(s) = CStr::from_ptr(std::mem::transmute(b)).to_str() {
-            return s.to_owned();
-        }
+    if let Ok(s) = CStr::from_ptr(std::mem::transmute(b)).to_str() {
+        return s.to_owned();
     }
     ret
 }

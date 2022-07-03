@@ -74,6 +74,10 @@ impl KernelSymbolEntry {
         self.name.as_str()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     pub fn len(&self) -> u64 {
         self.len
     }
@@ -220,7 +224,7 @@ impl SymbolAnalyzer {
                 _ => break,
             }
 
-            let mut entries = line.split(' ').into_iter();
+            let mut entries = line.split(' ');
 
             let addr_str = entries
                 .next()
@@ -391,14 +395,12 @@ impl ElfFile {
                     let plf = Path::new(&lf);
                     if plf.is_file() {
                         new_files.push(fs::File::open(lf)?);
-                    } else {
-                        if let Some(d) = fpath.to_path_buf().parent() {
-                            let mut debug_file = d.to_path_buf();
-                            debug_file.push(".debug");
-                            debug_file.push(&lf);
-                            if debug_file.is_file() {
-                                new_files.push(fs::File::open(debug_file)?);
-                            }
+                    } else if let Some(d) = fpath.to_path_buf().parent() {
+                        let mut debug_file = d.to_path_buf();
+                        debug_file.push(".debug");
+                        debug_file.push(&lf);
+                        if debug_file.is_file() {
+                            new_files.push(fs::File::open(debug_file)?);
                         }
                     }
                 }
@@ -409,7 +411,7 @@ impl ElfFile {
 
             for sym in syms {
                 if let Ok(name) = sym.name() {
-                    let name = cpp_demangle_sym(&name);
+                    let name = cpp_demangle_sym(name);
                     let entry = SymbolEntry {
                         name,
                         start: sym.address(),
@@ -422,7 +424,7 @@ impl ElfFile {
 
             for sym in dynsyms {
                 if let Ok(name) = sym.name() {
-                    let name = cpp_demangle_sym(&name);
+                    let name = cpp_demangle_sym(name);
                     let entry = SymbolEntry {
                         name,
                         start: sym.address(),

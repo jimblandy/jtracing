@@ -115,11 +115,11 @@ fn main() -> Result<()> {
 
     let open_skel = skel_builder
         .open()
-        .with_context(|| format!("Failed to open bpf."))?;
+        .with_context(|| "Failed to open bpf.")?;
 
     let mut skel = open_skel
         .load()
-        .with_context(|| format!("Failed to load bpf."))?;
+        .with_context(|| "Failed to load bpf.")?;
 
     let handle_event = move |cpu: i32, data: &[u8]| {
         do_handle_event(cpu, data);
@@ -129,15 +129,17 @@ fn main() -> Result<()> {
         .sample_cb(handle_event)
         .pages(32)
         .build()
-        .with_context(|| format!("Failed to create perf buffer"))?;
+        .with_context(|| "Failed to create perf buffer")?;
 
     let num_cpus =
-        libbpf_rs::num_possible_cpus().with_context(|| format!("Failed to get cpu numbers"))?;
+        libbpf_rs::num_possible_cpus().with_context(|| "Failed to get cpu numbers")?;
 
     let mut attr = peos::bindings::perf_event_attr::default();
+    /*
     attr.type_ = peos::bindings::perf_type_id_PERF_TYPE_HARDWARE;
     attr.size = std::mem::size_of::<peos::bindings::perf_event_attr>() as u32;
     attr.config = peos::bindings::perf_hw_id_PERF_COUNT_HW_CPU_CYCLES as u64;
+    */
     attr.__bindgen_anon_1.sample_freq = 99;
     attr.set_freq(1);
 
@@ -166,7 +168,7 @@ fn main() -> Result<()> {
             .progs_mut()
             .profile()
             .attach_perf_event(pefd)
-            .with_context(|| format!("Failed to attach perf event."))?;
+            .with_context(|| "Failed to attach perf event.")?;
 
         links.push(link);
     }

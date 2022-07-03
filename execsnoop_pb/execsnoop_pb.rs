@@ -69,15 +69,11 @@ fn main() -> Result<()> {
     let skel_builder = ExecsnoopPbSkelBuilder::default();
     set_print(Some((PrintLevel::Debug, print_to_log)));
 
-    let mut open_skel = skel_builder
-        .open()
-        .with_context(|| format!("Failed to open bpf."))?;
+    let mut open_skel = skel_builder.open().with_context(|| "Failed to open bpf.")?;
 
     open_skel.rodata().min_duration_ns = cli.duration * 1000000_u64;
 
-    let mut skel = open_skel
-        .load()
-        .with_context(|| format!("Faild to load bpf"))?;
+    let mut skel = open_skel.load().with_context(|| "Faild to load bpf")?;
 
     let start = chrono::Local::now();
     let show_timestamp = cli.timestamp;
@@ -96,7 +92,7 @@ fn main() -> Result<()> {
         };
 
         let now = chrono::Local::now();
-        let timestamp_us = (now.timestamp_nanos() - start.timestamp_nanos())/1000;
+        let timestamp_us = (now.timestamp_nanos() - start.timestamp_nanos()) / 1000;
         if event.exit_event != 0 {
             if show_timestamp {
                 print!(
@@ -158,14 +154,13 @@ fn main() -> Result<()> {
         .sample_cb(handle_event)
         .pages(32)
         .build()
-        .with_context(|| format!("Failed to create perf buffer"))?;
+        .with_context(|| "Failed to create perf buffer")?;
 
-    skel.attach()
-        .with_context(|| format!("Faild to load bpf"))?;
+    skel.attach().with_context(|| "Faild to load bpf")?;
 
     println!(
-        "{:^20}{:<7}{:<16}{:<8}{:<8}{}",
-        "TIME", "EVENT", "COMM", "PID", "PPID", "FILENAME/EXIT CODE"
+        "{:^20} {:<7} {:<16} {:<8} {:<8} FILENAME/EXIT CODE",
+        "TIME", "EVENT", "COMM", "PID", "PPID"
     );
 
     let running = Arc::new(AtomicBool::new(true));

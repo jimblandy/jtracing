@@ -79,10 +79,7 @@ impl TraceLog {
     pub async fn trace_fields(&mut self) -> Result<(String, u32, u8, String, f32, String)> {
         let task;
         let pid;
-        let cpu;
-        let flag;
         let mut msg = String::new();
-        let ts;
 
         let log = self
             .receiver
@@ -92,30 +89,30 @@ impl TraceLog {
 
         let mut to_process = log.as_str();
         let errlog = || Error::msg(format!("Invalid log string : {}", &log));
-        let mut spliter = to_process.find('[').ok_or(errlog())?;
+        let mut spliter = to_process.find('[').ok_or_else(errlog)?;
 
         {
             let task_pid_str = &to_process[..spliter];
             jdebug!("task_pid_str: {}", task_pid_str);
-            let tspliter = task_pid_str.rfind('-').ok_or(errlog())?;
+            let tspliter = task_pid_str.rfind('-').ok_or_else(errlog)?;
             task = String::from(task_pid_str[..tspliter].trim());
-            pid = task_pid_str[tspliter+1..].trim().parse()?; 
+            pid = task_pid_str[tspliter + 1..].trim().parse()?;
         }
 
-        to_process =&to_process[spliter + 1..];
+        to_process = &to_process[spliter + 1..];
         jdebug!("log str: {}", to_process);
-        spliter = to_process.find("] ").ok_or(errlog())?;
-        cpu = to_process[..spliter].parse()?;
+        spliter = to_process.find("] ").ok_or_else(errlog)?;
+        let cpu = to_process[..spliter].parse()?;
 
-        to_process =&to_process[spliter + 2..];
-        spliter = to_process.find(' ').ok_or(errlog())?;
-        flag = String::from(to_process[..spliter].trim());
+        to_process = &to_process[spliter + 2..];
+        spliter = to_process.find(' ').ok_or_else(errlog)?;
+        let flag = String::from(to_process[..spliter].trim());
 
-        to_process =&to_process[spliter + 1..];
-        spliter = to_process.find(':').ok_or(errlog())?;
-        ts = to_process[..spliter].trim().parse()?;
+        to_process = &to_process[spliter + 1..];
+        spliter = to_process.find(':').ok_or_else(errlog)?;
+        let ts = to_process[..spliter].trim().parse()?;
 
-        to_process =&to_process[spliter + 1..];
+        to_process = &to_process[spliter + 1..];
         msg.push_str(to_process.trim());
 
         Ok((

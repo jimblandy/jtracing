@@ -114,6 +114,7 @@ async fn async_main() -> Result<()> {
                      result = tlog.trace_fields() => {
                          match result {
                             Ok((task, pid, _cpu, _flag, ts, msg)) => {
+                                #[allow(clippy::never_loop)]
                                 loop {
                                     let mut fname = String::new();
                                     let mut flag = String::new();
@@ -151,10 +152,8 @@ async fn async_main() -> Result<()> {
                                             if !c.starts_with(&task) {
                                                 break;
                                             }
-                                        } else {
-                                            if c != &task {
+                                        } else if c != &task {
                                                 break;
-                                            }
                                         }
                                     }
 

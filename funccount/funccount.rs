@@ -147,7 +147,7 @@ fn process_events(
                         let mut i = 0_usize;
 
                         while i < num {
-                            let addr = NativeEndian::read_u64(&ks[0 + 8 * i..0 + 8 * (i + 1)]);
+                            let addr = NativeEndian::read_u64(&ks[8 * i..8 * (i + 1)]);
                             if addr == 0 {
                                 break;
                             }
@@ -168,7 +168,7 @@ fn process_events(
                         let mut i = 0_usize;
 
                         while i < num {
-                            let addr = NativeEndian::read_u64(&us[0 + 8 * i..0 + 8 * (i + 1)]);
+                            let addr = NativeEndian::read_u64(&us[8 * i..8 * (i + 1)]);
                             if addr == 0 {
                                 break;
                             }
@@ -244,7 +244,7 @@ fn print_result(cli: &Cli, result: &Vec<TraceResult>, runtime_s: u64) -> Result<
         let mut ts_previous = 0_u64;
         for event in result_exec {
             let pid = event.entry.pid;
-            let comm = bytes_to_string(event.entry.comm.as_ptr());
+            let comm = unsafe { bytes_to_string(event.entry.comm.as_ptr()) };
             let ts = event.ts / 1000;
             let ts_show;
 
@@ -291,7 +291,7 @@ fn print_result(cli: &Cli, result: &Vec<TraceResult>, runtime_s: u64) -> Result<
 
             for event in result_stack {
                 let pid = event.stack.pid;
-                let comm = bytes_to_string(event.stack.comm.as_ptr());
+                let comm = unsafe { bytes_to_string(event.stack.comm.as_ptr()) };
                 let cnt = event.cnt;
 
                 let (_comm_, cnt_) = pid_cnt.entry(pid).or_insert((comm, 0_u64));
@@ -311,7 +311,7 @@ fn print_result(cli: &Cli, result: &Vec<TraceResult>, runtime_s: u64) -> Result<
         } else {
             for event in result_stack {
                 let pid = event.stack.pid;
-                let comm = bytes_to_string(event.stack.comm.as_ptr());
+                let comm = unsafe { bytes_to_string(event.stack.comm.as_ptr()) };
                 let cnt = event.cnt;
 
                 println!(
@@ -383,9 +383,7 @@ fn main() -> Result<()> {
 
     set_print(Some((PrintLevel::Debug, print_to_log)));
 
-    let mut open_skel = skel_builder
-        .open()
-        .with_context(|| format!("Failed to open bpf."))?;
+    let mut open_skel = skel_builder.open().with_context(|| "Failed to open bpf.")?;
 
     open_skel.bss().self_pid = std::process::id() as i32;
 
@@ -402,11 +400,9 @@ fn main() -> Result<()> {
             log::warn!("Show stack option -s is unused when using -e.");
             cli.stack = false;
         }
-    } else {
-        if cli.relative {
-            log::warn!("Show relative time option -r is unused when -e is unused.");
-            cli.relative = false;
-        }
+    } else if cli.relative {
+        log::warn!("Show relative time option -r is unused when -e is unused.");
+        cli.relative = false;
     }
 
     if !cli.stack && cli.addr {
@@ -419,9 +415,7 @@ fn main() -> Result<()> {
         cli.file = false;
     }
 
-    let mut skel = open_skel
-        .load()
-        .with_context(|| format!("Failed to load bpf."))?;
+    let mut skel = open_skel.load().with_context(|| "Failed to load bpf.")?;
 
     let mut result = Vec::new();
     let mut links = vec![];
@@ -449,14 +443,14 @@ fn main() -> Result<()> {
             .sample_cb(handle_exec_trace)
             .pages(32)
             .build()
-            .with_context(|| format!("Failed to create perf buffer"))?;
+            .with_context(|| "Failed to create perf buffer")?;
 
         for arg in &cli.args {
             let mut processed = false;
 
             let tre = Regex::new(r"t:([a-z|0-9|_]+):([a-z|0-9|_]+)")?;
-            if tre.is_match(&arg) {
-                for g in tre.captures_iter(&arg) {
+            if tre.is_match(arg) {
+                for g in tre.captures_iter(arg) {
                     let tp_category = &g[1];
                     let tp_name = &g[2];
 
@@ -483,8 +477,8 @@ fn main() -> Result<()> {
             }
 
             let tre = Regex::new(r"u:(.+):(.+)")?;
-            if tre.is_match(&arg) {
-                for g in tre.captures_iter(&arg) {
+            if tre.is_match(arg) {
+                for g in tre.captures_iter(arg) {
                     let file = &g[1];
                     let symbol = &g[2];
 
@@ -515,8 +509,8 @@ fn main() -> Result<()> {
             }
 
             let tre = Regex::new(r"(k:)*([a-z|0-9|_]+)")?;
-            if tre.is_match(&arg) {
-                for g in tre.captures_iter(&arg) {
+            if tre.is_match(arg) {
+                for g in tre.captures_iter(arg) {
                     let func_name = &g[2];
 
                     println!("Attaching Kprobe {}.", func_name);
@@ -543,27 +537,17 @@ fn main() -> Result<()> {
             r.store(false, Ordering::SeqCst);
         })?;
 
-        if cli.exec {
-            if cli.duration > 0 {
-                println!("Tracing for {} seconds, Type Ctrl-C to stop.", cli.duration);
-            } else {
-                println!("Tracing... Type Ctrl-C to stop.");
-            }
-        } else {
-            if cli.duration > 0 {
-                println!("Tracing for {} seconds, Type Ctrl-C to stop.", cli.duration);
-            } else {
-                println!("Tracing... Type Ctrl-C to stop.");
-            }
-        }
-
-        let mut timeout: u64;
-
         if cli.duration > 0 {
-            timeout = (cli.duration * 1000) as u64;
+            println!("Tracing for {} seconds, Type Ctrl-C to stop.", cli.duration);
         } else {
-            timeout = 100;
+            println!("Tracing... Type Ctrl-C to stop.");
         }
+
+        let mut timeout = if cli.duration > 0 {
+            (cli.duration * 1000) as u64
+        } else {
+            100
+        };
 
         while running.load(Ordering::SeqCst) {
             let _ = perfbuf.poll(std::time::Duration::from_millis(timeout));
